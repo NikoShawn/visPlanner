@@ -1,3 +1,21 @@
+if(DEFINED ENV{CONDA_PREFIX})
+    message(WARNING "Conda environment detected, forcing system Boost")
+endif()
+
+set(Boost_NO_SYSTEM_PATHS TRUE)
+set(Boost_NO_BOOST_CMAKE TRUE)
+set(BOOST_ROOT "/usr")
+set(BOOST_INCLUDEDIR "/usr/include")
+set(BOOST_LIBRARYDIR "/usr/lib/x86_64-linux-gnu")
+
+find_package(Boost REQUIRED COMPONENTS system)
+set(Boost_USE_STATIC_LIBS OFF)
+set(Boost_USE_MULTITHREADED ON)
+set(Boost_USE_STATIC_RUNTIME OFF)
+
+# 添加这行来解决 boost::placeholders 警告
+add_definitions(-DBOOST_BIND_GLOBAL_PLACEHOLDERS)
+
 PROJECT(local_sensing_node)
 CMAKE_MINIMUM_REQUIRED(VERSION 2.8.3)
 SET(CMAKE_BUILD_TYPE Release) # Release, RelWithDebInfo
@@ -5,7 +23,8 @@ SET(CMAKE_BUILD_TYPE Release) # Release, RelWithDebInfo
 ADD_COMPILE_OPTIONS(-std=c++11 )
 ADD_COMPILE_OPTIONS(-std=c++14 )
 
-#set(ENABLE_CUDA false)
+
+# set(ENABLE_CUDA false)
 set(ENABLE_CUDA true)
 
 if(ENABLE_CUDA)
@@ -20,14 +39,20 @@ if(ENABLE_CUDA)
 #       -gencode arch=compute_52,code=sm_52; 
       # -gencode arch=compute_60,code=sm_60;
       # -gencode arch=compute_61,code=sm_61;
-      -gencode arch=compute_75,code=sm_75;
+      # -gencode arch=compute_75,code=sm_75;
+      -gencode arch=compute_80,code=sm_80;
   ) 
 
   SET(CUDA_PROPAGATE_HOST_FLAGS OFF)
 
   find_package(OpenCV REQUIRED)
   find_package(Eigen3 REQUIRED)
-  find_package(Boost REQUIRED COMPONENTS system filesystem)
+  # find_package(Boost REQUIRED COMPONENTS system filesystem)
+
+  # find_package(Boost REQUIRED COMPONENTS system)
+  # set(Boost_USE_STATIC_LIBS OFF)
+  # set(Boost_USE_MULTITHREADED ON)
+  # set(Boost_USE_STATIC_RUNTIME OFF)
 
   find_package(catkin REQUIRED COMPONENTS
       roscpp roslib cmake_modules cv_bridge image_transport pcl_ros sensor_msgs geometry_msgs nav_msgs quadrotor_msgs dynamic_reconfigure)
