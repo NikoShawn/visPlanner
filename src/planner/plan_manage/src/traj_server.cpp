@@ -14,8 +14,11 @@
 #include <tf/transform_broadcaster.h>
 #include<fstream>
 
+#include "quadrotor_msgs/FovFaces.h"
+
 ros::Publisher pos_cmd_pub, fov_pub_;
 ros::Publisher line_pub_, fasttracker_line_pub_, fasttracker_path_pub_;
+ros::Publisher fov_faces_pub;
 
 quadrotor_msgs::PositionCommand cmd;
 double pos_gain[3] = {0, 0, 0};
@@ -181,6 +184,44 @@ void pub_fov_visual( Eigen::Vector3d& p, Eigen::Quaterniond& q )
     point_temp.z = vector_temp[2];
     fov_node_marker.push_back(point_temp);
   }
+
+  // 定义五个面的顶点
+  quadrotor_msgs::FovFaces fov_faces_msg; // 替换为你的消息类型
+
+  // 面1：中心点、右上点、左上点
+  fov_faces_msg.face1.clear();
+  fov_faces_msg.face1.push_back(fov_node_marker[0]); // 中心点
+  fov_faces_msg.face1.push_back(fov_node_marker[1]); // 右上点
+  fov_faces_msg.face1.push_back(fov_node_marker[4]); // 左上点
+
+  // 面2：中心点、右上点、右下点
+  fov_faces_msg.face2.clear();
+  fov_faces_msg.face2.push_back(fov_node_marker[0]); // 中心点
+  fov_faces_msg.face2.push_back(fov_node_marker[1]); // 右上点
+  fov_faces_msg.face2.push_back(fov_node_marker[2]); // 右下点
+
+  // 面3：中心点、右下点、左下点
+  fov_faces_msg.face3.clear();
+  fov_faces_msg.face3.push_back(fov_node_marker[0]); // 中心点
+  fov_faces_msg.face3.push_back(fov_node_marker[2]); // 右下点
+  fov_faces_msg.face3.push_back(fov_node_marker[3]); // 左下点
+
+  // 面4：中心点、左下点、左上点
+  fov_faces_msg.face4.clear();
+  fov_faces_msg.face4.push_back(fov_node_marker[0]); // 中心点
+  fov_faces_msg.face4.push_back(fov_node_marker[3]); // 左下点
+  fov_faces_msg.face4.push_back(fov_node_marker[4]); // 左上点
+
+  // 面5：右上点、右下点、左下点、左上点（闭合面）
+  fov_faces_msg.face5.clear();
+  fov_faces_msg.face5.push_back(fov_node_marker[1]); // 右上点
+  fov_faces_msg.face5.push_back(fov_node_marker[2]); // 右下点
+  fov_faces_msg.face5.push_back(fov_node_marker[3]); // 左下点
+  fov_faces_msg.face5.push_back(fov_node_marker[4]); // 左上点
+
+  // 发布 FOV 面的顶点坐标
+  fov_faces_pub.publish(fov_faces_msg);
+  // ROS_INFO("Publishing FOV faces");
 
   markerNode_fov.points.push_back(fov_node_marker[0]);
   markerNode_fov.points.push_back(fov_node_marker[1]);
@@ -535,11 +576,11 @@ int main(int argc, char **argv)
   ros::NodeHandle nh("~");
 
   nh.param("drone_id", drone_id_, -1);
-  cout << drone_id_ << endl;
-  cout << drone_id_ << endl;
-  cout << drone_id_ << endl;
-  cout << drone_id_ << endl;
-  cout << drone_id_ << endl;
+  // cout << drone_id_ << endl;
+  // cout << drone_id_ << endl;
+  // cout << drone_id_ << endl;
+  // cout << drone_id_ << endl;
+  // cout << drone_id_ << endl;
   ros::Subscriber bspline_sub = nh.subscribe("planning/bspline", 10, bsplineCallback, ros::TransportHints().tcpNoDelay());
   ros::Subscriber odom_sub = nh.subscribe("/drone_0_visual_slam/odom", 50, odomCallbck, ros::TransportHints().tcpNoDelay());
   ros::Subscriber fasttracker_odom_sub = nh.subscribe("/visual_slam/odom", 50, fastTrackerOdomCallbck, ros::TransportHints().tcpNoDelay());
@@ -554,6 +595,7 @@ int main(int argc, char **argv)
   pos_cmd_pub = nh.advertise<quadrotor_msgs::PositionCommand>("/position_cmd", 50);
 
   fov_pub_ = nh.advertise<visualization_msgs::MarkerArray>("fov_visual", 5);	
+  fov_faces_pub = nh.advertise<quadrotor_msgs::FovFaces>("fov_faces", 5);
   line_pub_ = nh.advertise<visualization_msgs::MarkerArray>("line_visual", 5);	
   fasttracker_line_pub_ = nh.advertise<visualization_msgs::MarkerArray>("fasttracker_line_visual", 5);	
   fasttracker_path_pub_ = nh.advertise<nav_msgs::Path>("fasttracker_path", 5);	

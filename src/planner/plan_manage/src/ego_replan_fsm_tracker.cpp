@@ -287,11 +287,11 @@ namespace ego_planner
     if( (start_p - end_p).norm() < 0.5 )
     {
       changeFSMExecState(WAIT_TARGET, "PREDICT_CHECK");
-      ROS_WARN("Already for tracking!");
+      // ROS_WARN("Already for tracking!");
       return;
     }
 
-    cout << "Triggered!Predict!" << endl;
+    // cout << "Triggered!Predict!" << endl;
 
     // constexpr double time_step = 0.01;
     // double t_cur = 0;

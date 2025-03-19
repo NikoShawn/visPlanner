@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   visualization_msgs
   plan_env
   cv_bridge
+  quadrotor_msgs
 )
 
 

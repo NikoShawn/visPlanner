@@ -22,6 +22,7 @@
 #include <message_filters/sync_policies/exact_time.h>
 #include <message_filters/time_synchronizer.h>
 
+#include <quadrotor_msgs/FovFaces.h>
 #include <plan_env/raycast.h>
 
 #define logit(x) (log((x) / (1 - (x))))
@@ -121,7 +122,6 @@ struct MappingData {
   Eigen::Vector3d camera_pos_, last_camera_pos_;
   Eigen::Matrix3d camera_r_m_, last_camera_r_m_;
   Eigen::Matrix4d cam2body_;
-
   // depth image data
 
   cv::Mat depth_image_, last_depth_image_;
@@ -263,6 +263,8 @@ private:
   void depthOdomCallback(const sensor_msgs::ImageConstPtr& img, const nav_msgs::OdometryConstPtr& odom);
   void cloudCallback(const sensor_msgs::PointCloud2ConstPtr& img);
   void odomCallback(const nav_msgs::OdometryConstPtr& odom);
+  
+  void fovFacesCallback(const quadrotor_msgs::FovFaces::ConstPtr& msg);
 
   // update occupancy by raycasting
   void updateOccupancyCallback(const ros::TimerEvent& /*event*/);
@@ -306,7 +308,8 @@ private:
   ros::Publisher map_pub_, map_inf_pub_, map_freespace_pub_, map_esdf_pub_, visibility_esdf_pub_;
   ros::Timer occ_timer_, ESDF_timer_, vis_timer_, freespace_timer_;
 
-  //
+  ros::Subscriber fov_faves_sub_;
+
   uniform_real_distribution<double> rand_noise_;
   normal_distribution<double> rand_noise2_;
   default_random_engine eng_;

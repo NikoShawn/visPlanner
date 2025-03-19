@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   visualization_msgs
   cv_bridge
   message_filters
+  quadrotor_msgs
 )
 
 find_package(Eigen3 REQUIRED)

@@ -1,5 +1,7 @@
 #include "plan_env/grid_map.h"
+#include <quadrotor_msgs/FovFaces.h>
 
+// #include <quadrotor_msgs/FovFaces.h>
 // #define current_img_ md_.depth_image_[image_cnt_ & 1]
 // #define last_img_ md_.depth_image_[!(image_cnt_ & 1)]
 
@@ -144,15 +146,16 @@ void GridMap::initMap(ros::NodeHandle &nh)
       node_.subscribe<sensor_msgs::PointCloud2>("grid_map/cloud", 10, &GridMap::cloudCallback, this);
   indep_odom_sub_ =
       node_.subscribe<nav_msgs::Odometry>("grid_map/odom", 10, &GridMap::odomCallback, this);
-
+  // fov_faves_sub_ = node_.subscribe<quadrotor_msgs::FovFaces>("fov_faces", 10, &GridMap::fovFacesCallback, this);
   occ_timer_ = node_.createTimer(ros::Duration(0.05), &GridMap::updateOccupancyCallback, this);
   // freespace_timer_ = node_.createTimer(ros::Duration(0.1), &GridMap::updateFreespaceCallback, this);
+  // fov_timer_ = node_.createTimer(ros::Duration(0.1), &GridMap::updateFovCallback, this);
   ESDF_timer_ = node_.createTimer(ros::Duration(0.1), &GridMap::updateESDFCallback, this);
   vis_timer_ = node_.createTimer(ros::Duration(0.1), &GridMap::visCallback, this);
 
   map_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/occupancy", 10);
   map_inf_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/occupancy_inflate", 10);
-  map_freespace_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/freespace", 10);
+  // map_freespace_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/freespace", 10);
   // map_freespace_esdf_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/freespace_esdf", 10);
   map_esdf_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/esdf", 10);
   visibility_esdf_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/visibility_sdf", 10);
@@ -848,6 +851,7 @@ void GridMap::updateESDF3d()
 
 }
 
+
 void GridMap::updateESDFCallback(const ros::TimerEvent & /*event*/)
 {
   if (!md_.esdf_need_update_) return;
@@ -871,7 +875,7 @@ void GridMap::visCallback(const ros::TimerEvent & /*event*/)
   // publishFreespace();
   publishESDF();
   // publishFreespaceESDF();
-  // publishVisibilitySDF();
+  publishVisibilitySDF();
 }
 
 void GridMap::updateOccupancyCallback(const ros::TimerEvent & /*event*/)
@@ -964,7 +968,7 @@ void GridMap::odomCallback(const nav_msgs::OdometryConstPtr &odom)
   md_.camera_pos_(0) = odom->pose.pose.position.x;
   md_.camera_pos_(1) = odom->pose.pose.position.y;
   md_.camera_pos_(2) = odom->pose.pose.position.z;
-
+  // ROS_INFO("Received odom message");
   md_.has_odom_ = true;
 }
 
@@ -1499,21 +1503,27 @@ void GridMap::publishVisibilitySDF()
     return;
 
   // 把odom变成xyz
-  int x_bound = 100;
-  int y_bound = 50;
+  int x_bound = 30;
+  int y_bound = 30;
   // int z_bound = 1;
 
   pcl::PointXYZI pt;
   pcl::PointCloud<pcl::PointXYZI> cloud_esdf;
 
   Eigen::Vector3i odom_index;
-  Eigen::Vector3d odom_pos{0, 0, 0};
+  Eigen::Vector3d odom_pos{md_.camera_pos_(0), md_.camera_pos_(1), md_.camera_pos_(2)};
   posToIndex(odom_pos, odom_index);
 
   const double min_dist = -3.0;
   const double max_dist = 3.0;
   double dist;
 
+  // // 创建矩阵来存储ESDF值
+  // int matrix_width = 2 * x_bound + 1;
+  // int matrix_height = 2 * y_bound + 1;
+  // Eigen::MatrixXd esdf_matrix(matrix_height, matrix_width);
+  // esdf_matrix.setConstant(-1.0); // 初始化为-1表示无效值
+  
   for (int x = odom_index(0) - x_bound; x <= odom_index(0) + x_bound; ++x)
     for (int y = odom_index(1) - y_bound; y <= odom_index(1) + y_bound; ++y)
       {
@@ -1526,6 +1536,11 @@ void GridMap::publishVisibilitySDF()
         Eigen::Vector3d now_pos;
         indexToPos( id, now_pos );
         dist = getVisibility( now_pos, odom_pos );
+
+        // // 将ESDF值存储到矩阵中
+        // int matrix_x = x - (odom_index(0) - x_bound);
+        // int matrix_y = y - (odom_index(1) - y_bound);
+        // esdf_matrix(matrix_y, matrix_x) = dist;
 
         dist = min(dist, max_dist);
         dist = max(dist, min_dist);
@@ -1540,6 +1555,26 @@ void GridMap::publishVisibilitySDF()
         pt.intensity = (dist - min_dist) / (max_dist - min_dist);
         cloud_esdf.push_back(pt);
       }
+
+  // // 保存ESDF矩阵到文件
+  // static int file_count = 0;
+  // std::string file_name = "esdf_matrix_" + std::to_string(file_count++) + ".txt";
+  // std::ofstream file(file_name);
+  // if (file.is_open()) {
+  //   // 保存矩阵元数据
+  //   file << "# ESDF Matrix" << std::endl;
+  //   file << "# Width: " << matrix_width << std::endl;
+  //   file << "# Height: " << matrix_height << std::endl;
+  //   file << "# Origin: " << odom_pos.transpose() << std::endl;
+  //   file << "# Min_dist: " << min_dist << " Max_dist: " << max_dist << std::endl;
+    
+  //   // 保存矩阵数据
+  //   file << esdf_matrix << std::endl;
+  //   file.close();
+  //   ROS_INFO("ESDF matrix saved to %s", file_name.c_str());
+  // } else {
+  //   ROS_WARN("Failed to open file to save ESDF matrix");
+  // }
 
   cloud_esdf.width = cloud_esdf.points.size();
   cloud_esdf.height = 1;

@@ -53,6 +53,8 @@
     <remap from="~planning/bspline" to = "/drone_$(arg drone_id)_planning/bspline"/>
     <remap from="~fov_visual" to="drone_$(arg drone_id)_planning/fov_visual"/>
     
+    <remap from="~fov_faces" to="drone_$(arg drone_id)_planning/fov_faces"/>
+
     <remap from="~planning/data_display" to = "/drone_$(arg drone_id)_planning/data_display"/>
     <remap from="~planning/broadcast_bspline_from_planner" to = "/broadcast_bspline"/>
     <remap from="~planning/broadcast_bspline_to_planner" to = "/broadcast_bspline"/>
