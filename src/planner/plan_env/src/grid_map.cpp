@@ -1,5 +1,6 @@
 #include "plan_env/grid_map.h"
 #include <quadrotor_msgs/FovFaces.h>
+#include <std_msgs/Float32MultiArray.h>
 
 // #include <quadrotor_msgs/FovFaces.h>
 // #define current_img_ md_.depth_image_[image_cnt_ & 1]
@@ -159,6 +160,8 @@ void GridMap::initMap(ros::NodeHandle &nh)
   // map_freespace_esdf_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/freespace_esdf", 10);
   map_esdf_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/esdf", 10);
   visibility_esdf_pub_ = node_.advertise<sensor_msgs::PointCloud2>("grid_map/visibility_sdf", 10);
+  // ros::Publisher map_esdf_pub_ = nh_.advertise<esdf_mapping::ESDFPointArray>("esdf_points", 10);
+  esdf_pub_ = node_.advertise<std_msgs::Float32MultiArray>("esdf_data", 10);
 
   md_.esdf_need_update_ = false;
   md_.freespace_need_update_ = false;
@@ -968,7 +971,10 @@ void GridMap::odomCallback(const nav_msgs::OdometryConstPtr &odom)
   md_.camera_pos_(0) = odom->pose.pose.position.x;
   md_.camera_pos_(1) = odom->pose.pose.position.y;
   md_.camera_pos_(2) = odom->pose.pose.position.z;
-  // ROS_INFO("Received odom message");
+  md_.camera_r_m_ = Eigen::Quaterniond(odom->pose.pose.orientation.w, odom->pose.pose.orientation.x,
+                                       odom->pose.pose.orientation.y, odom->pose.pose.orientation.z)
+                        .toRotationMatrix();
+  ROS_INFO("Received odom message");
   md_.has_odom_ = true;
 }
 
@@ -1134,8 +1140,8 @@ void GridMap::publishESDF()
     return;
 
   // 把odom变成xyz
-  int x_bound = mp_.esdf_x_bound_;
-  int y_bound = mp_.esdf_y_bound_;
+  int x_bound = mp_.esdf_x_bound_/1.7;
+  int y_bound = mp_.esdf_y_bound_/1.7;
   // int z_bound = mp_.esdf_z_bound_;
 
   pcl::PointXYZI pt;
@@ -1145,9 +1151,38 @@ void GridMap::publishESDF()
   Eigen::Vector3d odom_pos{md_.camera_pos_(0), md_.camera_pos_(1), md_.camera_pos_(2)};
   posToIndex(odom_pos, odom_index);
 
+  std_msgs::Float32MultiArray esdf_msg;  // 使用 Float32MultiArray
+  esdf_msg.data.clear();  // 清空数据
+  esdf_msg.layout.dim.push_back(std_msgs::MultiArrayDimension());
+  esdf_msg.layout.dim[0].label = "esdf_data";  // 设置维度标签
+  esdf_msg.layout.dim[0].size = 0;  // 初始大小为 0
+  esdf_msg.layout.dim[0].stride = 4;  // 每个点的数据量为 4 (x, y, z, dist)
+
+  // double yaw = std::atan2(md_.camera_r_m_(1, 0), md_.camera_r_m_(0, 0));
+  // // ROS_INFO("Yaw angle: %f radians", yaw);
+  // double yaw_deg = yaw * 180 / M_PI;
+  // ROS_INFO("Yaw angle: %f degrees", yaw_deg);
   const double min_dist = -3.0;
   const double max_dist = 3.0;
   double dist;
+  double temp_dist;
+
+  // Eigen::Vector2d normal_vector(std::cos(yaw), std::sin(yaw));
+  // // 构造直线方程
+  // double a = normal_vector(0);
+  // double b = normal_vector(1);
+  // double c = -a * odom_index(0) - b * odom_index(1);
+  // // 计算直线方向向量
+  // Eigen::Vector2d direction_vector(-normal_vector(1), normal_vector(0));
+
+  // // 计算两个端点
+  // Eigen::Vector2d odom_point(odom_index(0), odom_index(1));
+  // Eigen::Vector2d endpoint1 = odom_point + 30 * direction_vector.normalized();
+  // Eigen::Vector2d endpoint2 = odom_point - 30 * direction_vector.normalized();
+
+  // // 输出结果
+  // std::cout << "Endpoint 1: (" << endpoint1(0) << ", " << endpoint1(1) << ")" << std::endl;
+  // std::cout << "Endpoint 2: (" << endpoint2(0) << ", " << endpoint2(1) << ")" << std::endl;
 
   for (int x = odom_index(0) - x_bound; x <= odom_index(0) + x_bound; ++x)
     for (int y = odom_index(1) - y_bound; y <= odom_index(1) + y_bound; ++y)
@@ -1160,6 +1195,7 @@ void GridMap::publishESDF()
         int adr = toAddress(id);
 
         dist = md_.distance_buffer_all_[adr];
+        temp_dist = dist;
         dist = min(dist, max_dist);
         dist = max(dist, min_dist);
 
@@ -1171,10 +1207,25 @@ void GridMap::publishESDF()
         pt.x = pos(0);
         pt.y = pos(1);
         pt.z = -0.2;
+
+        // 依次存入 x, y, z, dist
+        esdf_msg.data.push_back(pt.x);  // x
+        esdf_msg.data.push_back(pt.y);  // y
+        esdf_msg.data.push_back(pt.z);  // z
+        esdf_msg.data.push_back(temp_dist);    // dist
+        esdf_msg.layout.dim[0].size += 1;  // 每增加一个点，大小加 1
+
+        // pt.intensity = dist;
+        // if (dist > 0)
+        // {
         pt.intensity = (dist - min_dist) / (max_dist - min_dist);
         cloud_esdf.push_back(pt);
+        // }
+        
+        // pt.intensity = (dist - min_dist) / (max_dist - min_dist);
+        // cloud_esdf.push_back(pt);
       }
-
+  esdf_pub_.publish(esdf_msg);
   cloud_esdf.width = cloud_esdf.points.size();
   cloud_esdf.height = 1;
   cloud_esdf.is_dense = true;
@@ -1496,15 +1547,14 @@ double GridMap::getVisibility(Eigen::Vector3d pos, const Eigen::Vector3d& target
   return min_dist;
 }
 
-
 void GridMap::publishVisibilitySDF()
 {
   if (visibility_esdf_pub_.getNumSubscribers() <= 0)
     return;
 
   // 把odom变成xyz
-  int x_bound = 30;
-  int y_bound = 30;
+  int x_bound = mp_.esdf_x_bound_/2;
+  int y_bound = mp_.esdf_y_bound_/2;
   // int z_bound = 1;
 
   pcl::PointXYZI pt;
@@ -1514,15 +1564,9 @@ void GridMap::publishVisibilitySDF()
   Eigen::Vector3d odom_pos{md_.camera_pos_(0), md_.camera_pos_(1), md_.camera_pos_(2)};
   posToIndex(odom_pos, odom_index);
 
-  const double min_dist = -3.0;
+  const double min_dist = 0.0;
   const double max_dist = 3.0;
   double dist;
-
-  // // 创建矩阵来存储ESDF值
-  // int matrix_width = 2 * x_bound + 1;
-  // int matrix_height = 2 * y_bound + 1;
-  // Eigen::MatrixXd esdf_matrix(matrix_height, matrix_width);
-  // esdf_matrix.setConstant(-1.0); // 初始化为-1表示无效值
   
   for (int x = odom_index(0) - x_bound; x <= odom_index(0) + x_bound; ++x)
     for (int y = odom_index(1) - y_bound; y <= odom_index(1) + y_bound; ++y)
@@ -1537,14 +1581,8 @@ void GridMap::publishVisibilitySDF()
         indexToPos( id, now_pos );
         dist = getVisibility( now_pos, odom_pos );
 
-        // // 将ESDF值存储到矩阵中
-        // int matrix_x = x - (odom_index(0) - x_bound);
-        // int matrix_y = y - (odom_index(1) - y_bound);
-        // esdf_matrix(matrix_y, matrix_x) = dist;
-
         dist = min(dist, max_dist);
         dist = max(dist, min_dist);
-
 
         Eigen::Vector3d pos;
         indexToPos(Eigen::Vector3i(x, y, z), pos);
@@ -1552,29 +1590,13 @@ void GridMap::publishVisibilitySDF()
         pt.x = pos(0);
         pt.y = pos(1);
         pt.z = -0.2;
+        
         pt.intensity = (dist - min_dist) / (max_dist - min_dist);
-        cloud_esdf.push_back(pt);
+        // 只保留intensity大于阈值的点
+        if (pt.intensity < 0.04 && pt.intensity > 0) {  // 这里的0.7是阈值，你可以根据需要调整
+          cloud_esdf.push_back(pt);
+        }
       }
-
-  // // 保存ESDF矩阵到文件
-  // static int file_count = 0;
-  // std::string file_name = "esdf_matrix_" + std::to_string(file_count++) + ".txt";
-  // std::ofstream file(file_name);
-  // if (file.is_open()) {
-  //   // 保存矩阵元数据
-  //   file << "# ESDF Matrix" << std::endl;
-  //   file << "# Width: " << matrix_width << std::endl;
-  //   file << "# Height: " << matrix_height << std::endl;
-  //   file << "# Origin: " << odom_pos.transpose() << std::endl;
-  //   file << "# Min_dist: " << min_dist << " Max_dist: " << max_dist << std::endl;
-    
-  //   // 保存矩阵数据
-  //   file << esdf_matrix << std::endl;
-  //   file.close();
-  //   ROS_INFO("ESDF matrix saved to %s", file_name.c_str());
-  // } else {
-  //   ROS_WARN("Failed to open file to save ESDF matrix");
-  // }
 
   cloud_esdf.width = cloud_esdf.points.size();
   cloud_esdf.height = 1;

@@ -75,6 +75,7 @@ add_message_files(
   PolynomialTrajectory.msg
   LQRTrajectory.msg
   FovFaces.msg
+  ESDFMap.msg
 )
 
 generate_messages(

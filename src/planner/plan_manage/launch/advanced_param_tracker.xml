@@ -54,11 +54,12 @@
     <remap from="~fov_visual" to="drone_$(arg drone_id)_planning/fov_visual"/>
     
     <remap from="~fov_faces" to="drone_$(arg drone_id)_planning/fov_faces"/>
+    <remap from="~esdf_data" to = "/drone_$(arg drone_id)_planning/esdf_data"/>
 
     <remap from="~planning/data_display" to = "/drone_$(arg drone_id)_planning/data_display"/>
     <remap from="~planning/broadcast_bspline_from_planner" to = "/broadcast_bspline"/>
     <remap from="~planning/broadcast_bspline_to_planner" to = "/broadcast_bspline"/>
-
+    
     <remap from="~grid_map/odom" to="/drone_$(arg drone_id)_$(arg odometry_topic)"/>
     <remap from="~grid_map/cloud" to="/drone_$(arg drone_id)_$(arg cloud_topic)"/>
     <remap from="~grid_map/pose"   to = "/drone_$(arg drone_id)_$(arg camera_pose_topic)"/> 

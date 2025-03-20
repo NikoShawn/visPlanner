@@ -307,7 +307,8 @@ private:
   ros::Subscriber indep_cloud_sub_, indep_odom_sub_, extrinsic_sub_;
   ros::Publisher map_pub_, map_inf_pub_, map_freespace_pub_, map_esdf_pub_, visibility_esdf_pub_;
   ros::Timer occ_timer_, ESDF_timer_, vis_timer_, freespace_timer_;
-
+  
+  ros::Publisher esdf_pub_;
   ros::Subscriber fov_faves_sub_;
 
   uniform_real_distribution<double> rand_noise_;
