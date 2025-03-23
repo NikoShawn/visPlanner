@@ -117,7 +117,7 @@ void GridMap::initMap(ros::NodeHandle &nh)
       -1.0, 0.0, 0.0, 0.0,
       0.0, -1.0, 0.0, 0.0,
       0.0, 0.0, 0.0, 1.0;
-
+  
   /* init callback */
 
   depth_sub_.reset(new message_filters::Subscriber<sensor_msgs::Image>(node_, "grid_map/depth", 50));
@@ -716,6 +716,58 @@ void GridMap::fillESDF(F_get_val f_get_val, F_set_val f_set_val, int start, int 
   }
 }
 
+// 解析 FovFaces 消息数据，返回面的顶点字典
+std::map<std::string, std::vector<geometry_msgs::Point>> parse_faces_data(const quadrotor_msgs::FovFaces::ConstPtr& data) {
+  std::map<std::string, std::vector<geometry_msgs::Point>> parsed_faces;
+
+  // 解析 face1
+  for (const auto& p : data->face1) {
+      parsed_faces["face1"].push_back(p);
+  }
+
+  // 解析 face2
+  for (const auto& p : data->face2) {
+      parsed_faces["face2"].push_back(p);
+  }
+
+  // 解析 face3
+  for (const auto& p : data->face3) {
+      parsed_faces["face3"].push_back(p);
+  }
+
+  // 解析 face4
+  for (const auto& p : data->face4) {
+      parsed_faces["face4"].push_back(p);
+  }
+
+  // 解析 face5
+  for (const auto& p : data->face5) {
+      parsed_faces["face5"].push_back(p);
+  }
+
+  return parsed_faces;
+}
+
+void GridMap::fovFacesCallback(const quadrotor_msgs::FovFacesConstPtr &msg)
+{
+  std::map<std::string, std::vector<geometry_msgs::Point>> faces;
+
+  struct FaceCoordinates {
+    std::vector<std::pair<double, double>> vertices; // 5 个点的 (x, y) 坐标
+  };
+  
+  // 全局变量存储 5 个点的坐标
+  FaceCoordinates face_coordinates;
+
+  faces = parse_faces_data(msg);  // 解析数据
+  // 二维点调用
+  face_coordinates.vertices.clear();
+  // face_coordinates.vertices.push_back(std::make_pair(faces["face1"][0].x, faces["face1"][0].y));
+  for (size_t i = 0; i < 1; ++i) {
+      face_coordinates.vertices.push_back(std::make_pair(faces["face5"][i].x, faces["face5"][i].y));
+  }
+  ROS_INFO("receive faces data");
+}
 
 void GridMap::updateESDF3d()
 {
@@ -974,7 +1026,7 @@ void GridMap::odomCallback(const nav_msgs::OdometryConstPtr &odom)
   md_.camera_r_m_ = Eigen::Quaterniond(odom->pose.pose.orientation.w, odom->pose.pose.orientation.x,
                                        odom->pose.pose.orientation.y, odom->pose.pose.orientation.z)
                         .toRotationMatrix();
-  ROS_INFO("Received odom message");
+  // ROS_INFO("Received odom message");
   md_.has_odom_ = true;
 }
 
@@ -1133,6 +1185,38 @@ void GridMap::publishMap()
   map_pub_.publish(cloud_msg);
 }
 
+// 计算叉积
+double crossProduct(double x1, double y1, double x2, double y2) {
+  return x1 * y2 - x2 * y1;
+}
+
+// 检查点 (x, y) 是否在三角形内
+bool isPointInTriangle(double x, double y,
+                     double x1, double y1,
+                     double x2, double y2,
+                     double x3, double y3) {
+  // 计算向量 AB, BC, CA
+  double ab_x = x2 - x1, ab_y = y2 - y1;
+  double bc_x = x3 - x2, bc_y = y3 - y2;
+  double ca_x = x1 - x3, ca_y = y1 - y3;
+
+  // 计算向量 AP, BP, CP
+  double ap_x = x - x1, ap_y = y - y1;
+  double bp_x = x - x2, bp_y = y - y2;
+  double cp_x = x - x3, cp_y = y - y3;
+
+  // 计算叉积
+  double cross1 = crossProduct(ab_x, ab_y, ap_x, ap_y); // AB × AP
+  double cross2 = crossProduct(bc_x, bc_y, bp_x, bp_y); // BC × BP
+  double cross3 = crossProduct(ca_x, ca_y, cp_x, cp_y); // CA × CP
+
+  // 检查叉积符号是否一致
+  if ((cross1 >= 0 && cross2 >= 0 && cross3 >= 0) || 
+      (cross1 <= 0 && cross2 <= 0 && cross3 <= 0)) {
+      return true; // 点在三角形内
+  }
+  return false; // 点不在三角形内
+}
 
 void GridMap::publishESDF()
 {
@@ -1140,8 +1224,8 @@ void GridMap::publishESDF()
     return;
 
   // 把odom变成xyz
-  int x_bound = mp_.esdf_x_bound_/1.7;
-  int y_bound = mp_.esdf_y_bound_/1.7;
+  int x_bound = mp_.esdf_x_bound_;
+  int y_bound = mp_.esdf_y_bound_;
   // int z_bound = mp_.esdf_z_bound_;
 
   pcl::PointXYZI pt;
@@ -1167,26 +1251,15 @@ void GridMap::publishESDF()
   double dist;
   double temp_dist;
 
-  // Eigen::Vector2d normal_vector(std::cos(yaw), std::sin(yaw));
-  // // 构造直线方程
-  // double a = normal_vector(0);
-  // double b = normal_vector(1);
-  // double c = -a * odom_index(0) - b * odom_index(1);
-  // // 计算直线方向向量
-  // Eigen::Vector2d direction_vector(-normal_vector(1), normal_vector(0));
-
-  // // 计算两个端点
-  // Eigen::Vector2d odom_point(odom_index(0), odom_index(1));
-  // Eigen::Vector2d endpoint1 = odom_point + 30 * direction_vector.normalized();
-  // Eigen::Vector2d endpoint2 = odom_point - 30 * direction_vector.normalized();
-
-  // // 输出结果
-  // std::cout << "Endpoint 1: (" << endpoint1(0) << ", " << endpoint1(1) << ")" << std::endl;
-  // std::cout << "Endpoint 2: (" << endpoint2(0) << ", " << endpoint2(1) << ")" << std::endl;
-
   for (int x = odom_index(0) - x_bound; x <= odom_index(0) + x_bound; ++x)
     for (int y = odom_index(1) - y_bound; y <= odom_index(1) + y_bound; ++y)
       {
+        // if (isPointInTriangle())
+        // {
+        //   /* code */
+        // }
+        
+        
         // because the drone fly too close to the bound of the grid map
         int z = odom_index(2)+10;
         Eigen::Vector3i id{x, y, z};
@@ -1196,6 +1269,7 @@ void GridMap::publishESDF()
 
         dist = md_.distance_buffer_all_[adr];
         temp_dist = dist;
+        // std::cout << temp_dist << std::endl;
         dist = min(dist, max_dist);
         dist = max(dist, min_dist);
 
@@ -1215,15 +1289,9 @@ void GridMap::publishESDF()
         esdf_msg.data.push_back(temp_dist);    // dist
         esdf_msg.layout.dim[0].size += 1;  // 每增加一个点，大小加 1
 
-        // pt.intensity = dist;
-        // if (dist > 0)
-        // {
         pt.intensity = (dist - min_dist) / (max_dist - min_dist);
         cloud_esdf.push_back(pt);
-        // }
-        
-        // pt.intensity = (dist - min_dist) / (max_dist - min_dist);
-        // cloud_esdf.push_back(pt);
+
       }
   esdf_pub_.publish(esdf_msg);
   cloud_esdf.width = cloud_esdf.points.size();
