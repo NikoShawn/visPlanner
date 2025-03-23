@@ -1,11 +1,16 @@
 #include <ros/ros.h>
 #include <quadrotor_msgs/FovFaces.h>
 #include <std_msgs/Float32MultiArray.h>
+#include <nav_msgs/Odometry.h>
 #include <geometry_msgs/Point.h>
 #include <map>
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <tuple>
+#include <Eigen/Dense>
+#include <vector>
+#include <cmath>
 
 // 定义ESDF点的结构体
 struct ESDFPoint {
@@ -65,6 +70,175 @@ struct FaceCoordinates {
 
 // 全局变量存储 5 个点的坐标
 FaceCoordinates face_coordinates;
+
+struct Face3DCoordinates {
+    std::vector<std::tuple<double, double, double>> vertices;
+};
+
+// Declare the variable
+Face3DCoordinates face_coordinates_3d;
+
+// 定义三维坐标结构体
+std::map<std::string, std::vector<std::tuple<double, double, double>>> face_vertices_map;
+
+// 定义全局结构体存储位置数据
+struct DronePosition {
+    double x;
+    double y;
+    double z;
+    bool data_received;
+    
+    DronePosition() : x(0.0), y(0.0), z(0.0), data_received(false) {}
+};
+
+// 全局变量
+DronePosition drone_position;
+
+// 计算点到面的最近点的结构体
+struct NearestPointInfo {
+    std::string face_name;
+    std::tuple<double, double, double> nearest_point;
+    double distance;
+};
+
+// 计算点到线段的最近点
+std::tuple<double, double, double> nearestPointOnSegment(
+    const std::tuple<double, double, double>& point,
+    const std::tuple<double, double, double>& lineStart,
+    const std::tuple<double, double, double>& lineEnd) {
+    
+    double x0, y0, z0, x1, y1, z1, x2, y2, z2;
+    std::tie(x0, y0, z0) = point;
+    std::tie(x1, y1, z1) = lineStart;
+    std::tie(x2, y2, z2) = lineEnd;
+    
+    // 计算线段向量
+    double dx = x2 - x1;
+    double dy = y2 - y1;
+    double dz = z2 - z1;
+    
+    // 计算线段长度的平方
+    double lengthSquared = dx*dx + dy*dy + dz*dz;
+    
+    // 如果线段长度为0，则返回起点
+    if (lengthSquared == 0.0) {
+        return lineStart;
+    }
+    
+    // 计算投影参数t
+    double t = ((x0 - x1) * dx + (y0 - y1) * dy + (z0 - z1) * dz) / lengthSquared;
+    
+    // 限制t在[0,1]范围内
+    t = std::max(0.0, std::min(1.0, t));
+    
+    // 计算最近点
+    double nearestX = x1 + t * dx;
+    double nearestY = y1 + t * dy;
+    double nearestZ = z1 + t * dz;
+    
+    return std::make_tuple(nearestX, nearestY, nearestZ);
+}
+
+// 计算点到多边形的最近点
+std::tuple<double, double, double> nearestPointOnPolygon(
+    const std::tuple<double, double, double>& point,
+    const std::vector<std::tuple<double, double, double>>& polygon) {
+    
+    if (polygon.empty()) {
+        return point; // 如果多边形为空，返回原点
+    }
+    
+    if (polygon.size() == 1) {
+        return polygon[0]; // 如果多边形只有一个点，返回该点
+    }
+    
+    // 初始化最近距离为无穷大
+    double minDistanceSquared = std::numeric_limits<double>::max();
+    std::tuple<double, double, double> nearestPoint;
+    
+    // 遍历多边形的所有边
+    for (size_t i = 0; i < polygon.size(); ++i) {
+        size_t j = (i + 1) % polygon.size(); // 下一个点的索引（循环回到起点）
+        
+        // 计算点到当前边的最近点
+        auto pointOnSegment = nearestPointOnSegment(point, polygon[i], polygon[j]);
+        
+        // 计算距离的平方
+        double x0, y0, z0, x1, y1, z1;
+        std::tie(x0, y0, z0) = point;
+        std::tie(x1, y1, z1) = pointOnSegment;
+        double distanceSquared = (x1-x0)*(x1-x0) + (y1-y0)*(y1-y0) + (z1-z0)*(z1-z0);
+        
+        // 更新最近点
+        if (distanceSquared < minDistanceSquared) {
+            minDistanceSquared = distanceSquared;
+            nearestPoint = pointOnSegment;
+        }
+    }
+    
+    return nearestPoint;
+}
+
+// 计算无人机到每个面的最近点
+std::vector<NearestPointInfo> calculateNearestPointsToFaces(
+    const DronePosition& drone_position,
+    const std::map<std::string, std::vector<std::tuple<double, double, double>>>& face_vertices_map) {
+    
+    std::vector<NearestPointInfo> result;
+    
+    // 如果无人机位置数据未接收到，返回空结果
+    if (!drone_position.data_received) {
+        return result;
+    }
+    
+    // 无人机位置
+    auto drone_point = std::make_tuple(drone_position.x, drone_position.y, drone_position.z);
+    
+    // 遍历所有面
+    for (const auto& face_entry : face_vertices_map) {
+        const std::string& face_name = face_entry.first;
+        const auto& face_vertices = face_entry.second;
+        
+        // 计算无人机到当前面的最近点
+        auto nearest_point = nearestPointOnPolygon(drone_point, face_vertices);
+        
+        // 计算距离
+        double x1, y1, z1, x2, y2, z2;
+        std::tie(x1, y1, z1) = drone_point;
+        std::tie(x2, y2, z2) = nearest_point;
+        double distance = std::sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
+        
+        // 创建并添加结果
+        NearestPointInfo info;
+        info.face_name = face_name;
+        info.nearest_point = nearest_point;
+        info.distance = distance;
+        
+        result.push_back(info);
+    } 
+
+}
+
+void printNearestPointsToFaces(const DronePosition& drone_position) {
+    // 计算最近点
+    auto nearest_points = calculateNearestPointsToFaces(drone_position, face_vertices_map);
+    
+    // // 打印结果
+    // std::cout << "===== 无人机到FOV面的最近点 =====" << std::endl;
+    // std::cout << "无人机位置: (" << drone_position.x << ", " 
+    //           << drone_position.y << ", " << drone_position.z << ")" << std::endl;
+    
+    // for (const auto& info : nearest_points) {
+    //     double x, y, z;
+    //     std::tie(x, y, z) = info.nearest_point;
+        
+    //     std::cout << "面 \"" << info.face_name << "\":" << std::endl;
+    //     std::cout << "  最近点: (" << x << ", " << y << ", " << z << ")" << std::endl;
+    //     std::cout << "  距离: " << info.distance << std::endl;
+    // }
+    
+    // std::cout << "===== 结束 =====" << std::endl;
+}
 
 // 解析 FovFaces 消息数据，返回面的顶点字典
 std::map<std::string, std::vector<geometry_msgs::Point>> parse_faces_data(const quadrotor_msgs::FovFaces::ConstPtr& data) {
@@ -304,7 +478,6 @@ void detectOccludedRegions() {
         // }
 }
 
-
 // 裁剪ESDF点，只保留在FOV区域内的点
 void clipEsdfPointsToFov() {
     // 确保FOV顶点已经初始化
@@ -349,6 +522,58 @@ void detectObstacles(){
     // ROS_INFO("detect %zu in fov", obstacles.size());
 }
 
+/**
+ * 计算基于KL散度的权重
+ * @param mu 均值向量集合，每列是一个均值向量
+ * @param P_full 协方差矩阵集合
+ * @param initial_mu 初始分布的均值向量
+ * @param initial_P 初始分布的协方差矩阵
+ * @return 计算得到的权重向量
+ */
+Eigen::VectorXd calculateKLBasedWeights(
+    const Eigen::MatrixXd& mu,
+    const std::vector<Eigen::MatrixXd>& P_full,
+    const Eigen::VectorXd& initial_mu,
+    const Eigen::MatrixXd& initial_P) {
+    
+    int n = mu.cols();  // 组件数量
+    Eigen::VectorXd beta = Eigen::VectorXd::Ones(n);  // 默认权重为1
+    
+    if (n > 0) {
+        // 计算每个组件到初始分布的KL散度
+        int d = mu.rows();  // 维度
+        Eigen::VectorXd kl_divergences = Eigen::VectorXd::Zero(n);
+        
+        // 预先计算初始分布的逆矩阵和行列式
+        Eigen::MatrixXd initial_P_inv = initial_P.inverse();
+        double initial_P_det = initial_P.determinant();
+        
+        // 计算每个组件的KL散度
+        for (int i = 0; i < n; ++i) {
+            // 计算均值差异
+            Eigen::VectorXd diff = mu.col(i) - initial_mu;
+            
+            // 计算组件i到初始分布的KL散度
+            kl_divergences(i) = 0.5 * (
+                std::log(initial_P_det / P_full[i].determinant()) - d +
+                (initial_P_inv * P_full[i]).trace() +
+                diff.transpose() * initial_P_inv * diff
+            );
+        }
+        
+        // 计算权重为KL散度的倒数
+        double eps = 1e-10;  // 避免除以零
+        for (int i = 0; i < n; ++i) {
+            beta(i) = 1.0 / (kl_divergences(i) + eps);
+        }
+        
+        // 归一化权重使其和为1
+        beta = beta / beta.sum();
+    }
+    
+    return beta;
+}
+
 // FOV 话题回调函数，解析数据并更新全局变量 `faces`
 void fovFacesCallback(const quadrotor_msgs::FovFaces::ConstPtr& data) {
     
@@ -360,15 +585,62 @@ void fovFacesCallback(const quadrotor_msgs::FovFaces::ConstPtr& data) {
         face_coordinates.vertices.push_back(std::make_pair(faces["face5"][i].x, faces["face5"][i].y));
     }
 
-    // std::cout << "face1: " <<face_coordinates.vertices[0].first << " " << face_coordinates.vertices[0].second << std::endl;
-    // std::cout << "face5: " <<face_coordinates.vertices[1].first << " " << face_coordinates.vertices[1].second << std::endl;
-    // std::cout << "face5: " <<face_coordinates.vertices[2].first << " " << face_coordinates.vertices[2].second << std::endl;
-    // std::cout << "face5: " <<face_coordinates.vertices[3].first << " " << face_coordinates.vertices[3].second << std::endl;
-    // std::cout << "face5: " <<face_coordinates.vertices[4].first << " " << face_coordinates.vertices[4].second << std::endl;
+    // 清空之前的面顶点映射
+    face_vertices_map.clear();
+    
+    // 三维点调用
+    face_coordinates_3d.vertices.clear();
 
-    // ROS_INFO("FovFaces data has been updated!");
+    // 遍历所有面并保存所有顶点到映射中
+    for (const auto& face_pair : faces) {
+        const std::string& face_name = face_pair.first;
+        const std::vector<geometry_msgs::Point>& face_points = face_pair.second;
+        
+        // 为当前面创建顶点列表
+        std::vector<std::tuple<double, double, double>> face_vertices;
+        
+        // 遍历当前面的所有顶点
+        for (const auto& point : face_points) {
+            // 添加到当前面的顶点列表
+            face_vertices.push_back(std::make_tuple(point.x, point.y, point.z));
+            
+            // 同时添加到全局顶点列表
+            face_coordinates_3d.vertices.push_back(std::make_tuple(point.x, point.y, point.z));
+        }
+        
+        // 将面名称和对应的顶点存储到映射中
+        face_vertices_map[face_name] = face_vertices;
+    }
+
+    //  // 调试信息：打印所有面及其顶点
+    //  std::cout << "===== 调试信息：面顶点映射 =====" << std::endl;
+    //  std::cout << "总共有 " << face_vertices_map.size() << " 个面" << std::endl;
+     
+    //  for (const auto& face_entry : face_vertices_map) {
+    //      const std::string& face_name = face_entry.first;
+    //      const auto& vertices = face_entry.second;
+         
+    //      std::cout << "面 \"" << face_name << "\" 有 " << vertices.size() << " 个顶点:" << std::endl;
+         
+    //      for (size_t i = 0; i < vertices.size(); ++i) {
+    //          double x, y, z;
+    //          std::tie(x, y, z) = vertices[i];
+    //          std::cout << "  顶点 " << i << ": (" << x << ", " << y << ", " << z << ")" << std::endl;
+    //      }
+    //  }
+     
+    //  // 打印 face_coordinates_3d 中的顶点
+    //  std::cout << "\n===== 调试信息：face_coordinates_3d =====" << std::endl;
+    //  std::cout << "总共有 " << face_coordinates_3d.vertices.size() << " 个顶点" << std::endl;
+     
+    //  for (size_t i = 0; i < face_coordinates_3d.vertices.size(); ++i) {
+    //      double x, y, z;
+    //      std::tie(x, y, z) = face_coordinates_3d.vertices[i];
+    //      std::cout << "顶点 " << i << ": (" << x << ", " << y << ", " << z << ")" << std::endl;
+    //  }
+     
+    //  std::cout << "===== 调试信息结束 =====" << std::endl;
 }
-
 
 // 回调函数，当接收到ESDFMap消息时会被调用
 void esdfCallback(const std_msgs::Float32MultiArray::ConstPtr& msg) {
@@ -394,6 +666,18 @@ void esdfCallback(const std_msgs::Float32MultiArray::ConstPtr& msg) {
     // detectObstacles();
 }
 
+void odomCallback(const nav_msgs::Odometry::ConstPtr& msg){
+    // 获取本机位置
+    drone_position.x = msg->pose.pose.position.x;
+    drone_position.y = msg->pose.pose.position.y;
+    drone_position.z = msg->pose.pose.position.z;
+    
+    // 标记已接收数据
+    drone_position.data_received = true;
+    
+    // ROS_INFO("本机位置: (%.2f, %.2f, %.2f)", drone_position.x, drone_position.y, drone_position.z);
+}
+
 int main(int argc, char** argv) {
     ros::init(argc, argv, "GMM_Planning_Test");
     ros::NodeHandle nh;
@@ -403,6 +687,9 @@ int main(int argc, char** argv) {
 
     // 订阅ESDFMap话题
     ros::Subscriber esdf_sub = nh.subscribe("/drone_0_planning/esdf_data", 10, esdfCallback);
+
+    // 订阅本机位置话题
+    ros::Subscriber target_odom_sub = nh.subscribe("/drone_1_visual_slam/odom", 10, odomCallback);
     
     // ROS_INFO("Hello, ROS! Waiting for messages...");
     // 创建一个定时器，定期检查和处理esdf_points
@@ -415,7 +702,8 @@ int main(int argc, char** argv) {
             clipEsdfPointsToFov();
             detectObstacles();
             detectOccludedRegions();
-
+            // printNearestPointsToFaces(drone_position);
+            
         rate.sleep();
         }
     }
