@@ -16,6 +16,10 @@
 
 ros::Publisher nearest_points_pub;
 
+// Global variables to store clustering results
+std::vector<std::vector<size_t>> obstacle_clusters;
+std::vector<size_t> obstacle_labels;
+
 // Define 2D point structure for clustering
 struct Point2D {
     double x;
@@ -568,9 +572,6 @@ void detectOccludedRegions() {
         
         obstacles_with_angles.push_back({obs, angle});
         
-        // 打印每个障碍物的角度（用于调试）
-        // ROS_INFO("障碍物位置 (%.2f, %.2f), 角度: %.2f 弧度 (%.2f 度)", 
-        //           obs.x, obs.y, angle, angle * 180.0 / M_PI);
     }
 
     // 按照角度大小对障碍物点进行排序
@@ -684,32 +685,7 @@ void detectOccludedRegions() {
         obstacle_regions.push_back(region);
         
         }
-        // 调试用
-        // ROS_INFO("共保存了 %zu 个障碍物区域", obstacle_regions.size());
-        // for (size_t i = 0; i < obstacle_regions.size(); ++i) {
-        //     const auto& region = obstacle_regions[i];
-            
-        //     ROS_INFO("障碍物 #%d 的坐标点:", region.id);
-        //     ROS_INFO("  最小角度点: (%.2f, %.2f, %.2f), 距离值: %.2f", 
-        //              region.min_angle_point.x, region.min_angle_point.y, 
-        //              region.min_angle_point.z, region.min_angle_point.distance);
-        //     ROS_INFO("  最大角度点: (%.2f, %.2f, %.2f), 距离值: %.2f", 
-        //              region.max_angle_point.x, region.max_angle_point.y, 
-        //              region.max_angle_point.z, region.max_angle_point.distance);
-            
-        //     // 如果交点有效，也输出交点坐标
-        //     if (!std::isnan(region.min_intersection.first)) {
-        //         ROS_INFO("  最小角度射线与FOV边界的交点: (%.2f, %.2f)", 
-        //                  region.min_intersection.first, region.min_intersection.second);
-        //     }
-            
-        //     if (!std::isnan(region.max_intersection.first)) {
-        //         ROS_INFO("  最大角度射线与FOV边界的交点: (%.2f, %.2f)", 
-        //                  region.max_intersection.first, region.max_intersection.second);
-        //     }
-            
-        //     ROS_INFO("----------------------------");
-        // }
+
 }
 
 // 裁剪ESDF点，只保留在FOV区域内的点
@@ -740,6 +716,8 @@ void clipEsdfPointsToFov() {
     // ROS_INFO("Clipped ESDF points: %zu out of %zu are within FOV", 
     //          fov_esdf_points.size(), esdf_points.size());
 }
+
+
 
 // DBSCAN algorithm for obstacle clustering
 std::vector<std::vector<size_t>> dbscanObstacles(
@@ -863,155 +841,155 @@ std::vector<size_t> labelObstacles(
 // Function to perform DBSCAN clustering on obstacles and visualize the results
 void clusterObstacles(const std::vector<ESDFPoint>& obstacles, double eps = 0.5, int minPts = 5) {
     // Run DBSCAN algorithm
-    auto clusters = dbscanObstacles(obstacles, eps, minPts);
-    auto labels = labelObstacles(clusters, obstacles.size());
+    obstacle_clusters = dbscanObstacles(obstacles, eps, minPts);
+    obstacle_labels = labelObstacles(obstacle_clusters, obstacles.size());
     
     // Log clustering results
-    ROS_INFO("Found %zu obstacle clusters", clusters.size());
+    ROS_INFO("Found %zu obstacle clusters", obstacle_clusters.size());
     
-    // Print number of points in each cluster
-    for (size_t i = 0; i < clusters.size(); i++) {
-        ROS_INFO("Cluster %zu contains %zu points", i+1, clusters[i].size());
-    }
+    // // Print number of points in each cluster
+    // for (size_t i = 0; i < clusters.size(); i++) {
+    //     ROS_INFO("Cluster %zu contains %zu points", i+1, clusters[i].size());
+    // }
     
     // Count noise points
-    size_t noiseCount = std::count(labels.begin(), labels.end(), 0);
-    ROS_INFO("Detected %zu noise points", noiseCount);
+    // size_t noiseCount = std::count(labels.begin(), labels.end(), 0);
+    // ROS_INFO("Detected %zu noise points", noiseCount);
     
     // Visualize clusters in RViz
-    visualization_msgs::MarkerArray cluster_markers;
-    int marker_id = 0;
+    // visualization_msgs::MarkerArray cluster_markers;
+    // int marker_id = 0;
     
-    // Create a marker for each cluster with a distinct color
-    for (size_t i = 0; i < clusters.size(); ++i) {
-        // Choose a distinctive color for this cluster
-        float hue = static_cast<float>(i) / clusters.size();
-        float r, g, b;
+    // // Create a marker for each cluster with a distinct color
+    // for (size_t i = 0; i < clusters.size(); ++i) {
+    //     // Choose a distinctive color for this cluster
+    //     float hue = static_cast<float>(i) / clusters.size();
+    //     float r, g, b;
         
-        // Simple HSV to RGB conversion
-        if (hue < 1.0/3.0) {
-            r = 1.0;
-            g = 3.0 * hue;
-            b = 0.0;
-        } else if (hue < 2.0/3.0) {
-            r = 1.0 - 3.0 * (hue - 1.0/3.0);
-            g = 1.0;
-            b = 3.0 * (hue - 1.0/3.0);
-        } else {
-            r = 0.0;
-            g = 1.0 - 3.0 * (hue - 2.0/3.0);
-            b = 1.0;
-        }
+    //     // Simple HSV to RGB conversion
+    //     if (hue < 1.0/3.0) {
+    //         r = 1.0;
+    //         g = 3.0 * hue;
+    //         b = 0.0;
+    //     } else if (hue < 2.0/3.0) {
+    //         r = 1.0 - 3.0 * (hue - 1.0/3.0);
+    //         g = 1.0;
+    //         b = 3.0 * (hue - 1.0/3.0);
+    //     } else {
+    //         r = 0.0;
+    //         g = 1.0 - 3.0 * (hue - 2.0/3.0);
+    //         b = 1.0;
+    //     }
         
-        // Create a marker for points in this cluster
-        visualization_msgs::Marker points_marker;
-        points_marker.header.frame_id = "world"; // Use appropriate frame
-        points_marker.header.stamp = ros::Time::now();
-        points_marker.ns = "obstacle_clusters";
-        points_marker.id = marker_id++;
-        points_marker.type = visualization_msgs::Marker::POINTS;
-        points_marker.action = visualization_msgs::Marker::ADD;
-        points_marker.pose.orientation.w = 1.0;
-        points_marker.scale.x = 0.1;
-        points_marker.scale.y = 0.1;
-        points_marker.color.r = r;
-        points_marker.color.g = g;
-        points_marker.color.b = b;
-        points_marker.color.a = 1.0;
-        points_marker.lifetime = ros::Duration(1.0);
+    //     // Create a marker for points in this cluster
+    //     visualization_msgs::Marker points_marker;
+    //     points_marker.header.frame_id = "world"; // Use appropriate frame
+    //     points_marker.header.stamp = ros::Time::now();
+    //     points_marker.ns = "obstacle_clusters";
+    //     points_marker.id = marker_id++;
+    //     points_marker.type = visualization_msgs::Marker::POINTS;
+    //     points_marker.action = visualization_msgs::Marker::ADD;
+    //     points_marker.pose.orientation.w = 1.0;
+    //     points_marker.scale.x = 0.1;
+    //     points_marker.scale.y = 0.1;
+    //     points_marker.color.r = r;
+    //     points_marker.color.g = g;
+    //     points_marker.color.b = b;
+    //     points_marker.color.a = 1.0;
+    //     points_marker.lifetime = ros::Duration(1.0);
         
-        // Add all points in this cluster
-        for (auto point_idx : clusters[i]) {
-            geometry_msgs::Point p;
-            p.x = obstacles[point_idx].x;
-            p.y = obstacles[point_idx].y;
-            p.z = obstacles[point_idx].z;
-            points_marker.points.push_back(p);
-        }
+    //     // Add all points in this cluster
+    //     for (auto point_idx : clusters[i]) {
+    //         geometry_msgs::Point p;
+    //         p.x = obstacles[point_idx].x;
+    //         p.y = obstacles[point_idx].y;
+    //         p.z = obstacles[point_idx].z;
+    //         points_marker.points.push_back(p);
+    //     }
         
-        cluster_markers.markers.push_back(points_marker);
+    //     cluster_markers.markers.push_back(points_marker);
         
-        // Create a text marker to label this cluster
-        visualization_msgs::Marker text_marker;
-        text_marker.header = points_marker.header;
-        text_marker.ns = "obstacle_cluster_labels";
-        text_marker.id = marker_id++;
-        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
-        text_marker.action = visualization_msgs::Marker::ADD;
+    //     // Create a text marker to label this cluster
+    //     visualization_msgs::Marker text_marker;
+    //     text_marker.header = points_marker.header;
+    //     text_marker.ns = "obstacle_cluster_labels";
+    //     text_marker.id = marker_id++;
+    //     text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+    //     text_marker.action = visualization_msgs::Marker::ADD;
         
-        // Calculate centroid of the cluster for text placement
-        double cx = 0, cy = 0, cz = 0;
-        for (auto point_idx : clusters[i]) {
-            cx += obstacles[point_idx].x;
-            cy += obstacles[point_idx].y;
-            cz += obstacles[point_idx].z;
-        }
-        cx /= clusters[i].size();
-        cy /= clusters[i].size();
-        cz /= clusters[i].size();
+    //     // Calculate centroid of the cluster for text placement
+    //     double cx = 0, cy = 0, cz = 0;
+    //     for (auto point_idx : clusters[i]) {
+    //         cx += obstacles[point_idx].x;
+    //         cy += obstacles[point_idx].y;
+    //         cz += obstacles[point_idx].z;
+    //     }
+    //     cx /= clusters[i].size();
+    //     cy /= clusters[i].size();
+    //     cz /= clusters[i].size();
         
-        text_marker.pose.position.x = cx;
-        text_marker.pose.position.y = cy;
-        text_marker.pose.position.z = cz + 0.2; // Slightly above the cluster
-        text_marker.pose.orientation.w = 1.0;
+    //     text_marker.pose.position.x = cx;
+    //     text_marker.pose.position.y = cy;
+    //     text_marker.pose.position.z = cz + 0.2; // Slightly above the cluster
+    //     text_marker.pose.orientation.w = 1.0;
         
-        std::stringstream ss;
-        ss << "Cluster " << (i + 1) << " (" << clusters[i].size() << " points)";
-        text_marker.text = ss.str();
+    //     std::stringstream ss;
+    //     ss << "Cluster " << (i + 1) << " (" << clusters[i].size() << " points)";
+    //     text_marker.text = ss.str();
         
-        text_marker.scale.z = 0.15; // Text size
-        text_marker.color.r = 1.0;
-        text_marker.color.g = 1.0;
-        text_marker.color.b = 1.0;
-        text_marker.color.a = 1.0;
-        text_marker.lifetime = ros::Duration(1.0);
+    //     text_marker.scale.z = 0.15; // Text size
+    //     text_marker.color.r = 1.0;
+    //     text_marker.color.g = 1.0;
+    //     text_marker.color.b = 1.0;
+    //     text_marker.color.a = 1.0;
+    //     text_marker.lifetime = ros::Duration(1.0);
         
-        cluster_markers.markers.push_back(text_marker);
-    }
+    //     cluster_markers.markers.push_back(text_marker);
+    // }
     
-    // Create a marker for noise points (if any)
-    std::vector<size_t> noise_points;
-    for (size_t i = 0; i < obstacles.size(); ++i) {
-        if (labels[i] == 0) {
-            noise_points.push_back(i);
-        }
-    }
+    // // Create a marker for noise points (if any)
+    // std::vector<size_t> noise_points;
+    // for (size_t i = 0; i < obstacles.size(); ++i) {
+    //     if (labels[i] == 0) {
+    //         noise_points.push_back(i);
+    //     }
+    // }
     
-    if (!noise_points.empty()) {
-        visualization_msgs::Marker noise_marker;
-        noise_marker.header.frame_id = "world";
-        noise_marker.header.stamp = ros::Time::now();
-        noise_marker.ns = "obstacle_clusters";
-        noise_marker.id = marker_id++;
-        noise_marker.type = visualization_msgs::Marker::POINTS;
-        noise_marker.action = visualization_msgs::Marker::ADD;
-        noise_marker.pose.orientation.w = 1.0;
-        noise_marker.scale.x = 0.05;
-        noise_marker.scale.y = 0.05;
-        noise_marker.color.r = 0.5;
-        noise_marker.color.g = 0.5;
-        noise_marker.color.b = 0.5;
-        noise_marker.color.a = 0.5;
-        noise_marker.lifetime = ros::Duration(1.0);
+    // if (!noise_points.empty()) {
+    //     visualization_msgs::Marker noise_marker;
+    //     noise_marker.header.frame_id = "world";
+    //     noise_marker.header.stamp = ros::Time::now();
+    //     noise_marker.ns = "obstacle_clusters";
+    //     noise_marker.id = marker_id++;
+    //     noise_marker.type = visualization_msgs::Marker::POINTS;
+    //     noise_marker.action = visualization_msgs::Marker::ADD;
+    //     noise_marker.pose.orientation.w = 1.0;
+    //     noise_marker.scale.x = 0.05;
+    //     noise_marker.scale.y = 0.05;
+    //     noise_marker.color.r = 0.5;
+    //     noise_marker.color.g = 0.5;
+    //     noise_marker.color.b = 0.5;
+    //     noise_marker.color.a = 0.5;
+    //     noise_marker.lifetime = ros::Duration(1.0);
         
-        for (auto point_idx : noise_points) {
-            geometry_msgs::Point p;
-            p.x = obstacles[point_idx].x;
-            p.y = obstacles[point_idx].y;
-            p.z = obstacles[point_idx].z;
-            noise_marker.points.push_back(p);
-        }
+    //     for (auto point_idx : noise_points) {
+    //         geometry_msgs::Point p;
+    //         p.x = obstacles[point_idx].x;
+    //         p.y = obstacles[point_idx].y;
+    //         p.z = obstacles[point_idx].z;
+    //         noise_marker.points.push_back(p);
+    //     }
         
-        cluster_markers.markers.push_back(noise_marker);
-    }
+    //     cluster_markers.markers.push_back(noise_marker);
+    // }
     
-    // Publish the marker array
-    static ros::Publisher cluster_pub = 
-        ros::NodeHandle().advertise<visualization_msgs::MarkerArray>("/obstacle_clusters", 1);
+    // // Publish the marker array
+    // static ros::Publisher cluster_pub = 
+    //     ros::NodeHandle().advertise<visualization_msgs::MarkerArray>("/obstacle_clusters", 1);
     
-    if (!cluster_markers.markers.empty()) {
-        cluster_pub.publish(cluster_markers);
-    }
+    // if (!cluster_markers.markers.empty()) {
+    //     cluster_pub.publish(cluster_markers);
+    // }
 }
 
 void detectObstacles(){
