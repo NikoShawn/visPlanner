@@ -12,6 +12,15 @@ find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
   quadrotor_msgs
+  nav_msgs
+  geometry_msgs
+  visualization_msgs
+)
+
+catkin_package(
+  INCLUDE_DIRS include
+  CATKIN_DEPENDS roscpp std_msgs nav_msgs geometry_msgs visualization_msgs quadrotor_msgs
+  DEPENDS EIGEN3
 )
 
 ## System dependencies are found with CMake's conventions

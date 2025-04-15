@@ -11,6 +11,10 @@
 #include <Eigen/Dense>
 #include <vector>
 #include <cmath>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
+
+ros::Publisher nearest_points_pub;
 
 // 定义ESDF点的结构体
 struct ESDFPoint {
@@ -101,6 +105,8 @@ struct NearestPointInfo {
     double distance;
 };
 
+// ----------------------------------Fov Faces----------------------------------
+
 // 计算点到线段的最近点
 std::tuple<double, double, double> nearestPointOnSegment(
     const std::tuple<double, double, double>& point,
@@ -179,66 +185,283 @@ std::tuple<double, double, double> nearestPointOnPolygon(
     return nearestPoint;
 }
 
-// 计算无人机到每个面的最近点
+// Check if a point is inside a 3D polygon
+bool isPointInPolygon(
+    const std::tuple<double, double, double>& point,
+    const std::vector<std::tuple<double, double, double>>& polygon,
+    double nx, double ny, double nz) {
+    
+    if (polygon.size() < 3) {
+        return false;
+    }
+    
+    double px, py, pz;
+    std::tie(px, py, pz) = point;
+    
+    // Find the best 2D projection plane based on the normal
+    int dominant_axis = 0;
+    double max_component = std::abs(nx);
+    if (std::abs(ny) > max_component) {
+        dominant_axis = 1;
+        max_component = std::abs(ny);
+    }
+    if (std::abs(nz) > max_component) {
+        dominant_axis = 2;
+    }
+    
+    // Project to 2D by dropping one coordinate
+    std::vector<std::pair<double, double>> polygon_2d;
+    std::pair<double, double> point_2d;
+    
+    for (const auto& vertex : polygon) {
+        double vx, vy, vz;
+        std::tie(vx, vy, vz) = vertex;
+        
+        switch (dominant_axis) {
+            case 0: // Drop x
+                polygon_2d.push_back(std::make_pair(vy, vz));
+                break;
+            case 1: // Drop y
+                polygon_2d.push_back(std::make_pair(vx, vz));
+                break;
+            case 2: // Drop z
+                polygon_2d.push_back(std::make_pair(vx, vy));
+                break;
+        }
+    }
+    
+    // Project the point too
+    switch (dominant_axis) {
+        case 0: // Drop x
+            point_2d = std::make_pair(py, pz);
+            break;
+        case 1: // Drop y
+            point_2d = std::make_pair(px, pz);
+            break;
+        case 2: // Drop z
+            point_2d = std::make_pair(px, py);
+            break;
+    }
+    
+    // Use ray-casting algorithm in 2D
+    bool inside = false;
+    for (size_t i = 0, j = polygon_2d.size() - 1; i < polygon_2d.size(); j = i++) {
+        if (((polygon_2d[i].second > point_2d.second) != (polygon_2d[j].second > point_2d.second)) &&
+            (point_2d.first < (polygon_2d[j].first - polygon_2d[i].first) * (point_2d.second - polygon_2d[i].second) / 
+             (polygon_2d[j].second - polygon_2d[i].second) + polygon_2d[i].first)) {
+            inside = !inside;
+        }
+    }
+    
+    return inside;
+}
+
+// Calculate nearest points to faces, including projections onto face planes
 std::vector<NearestPointInfo> calculateNearestPointsToFaces(
     const DronePosition& drone_position,
     const std::map<std::string, std::vector<std::tuple<double, double, double>>>& face_vertices_map) {
     
     std::vector<NearestPointInfo> result;
     
-    // 如果无人机位置数据未接收到，返回空结果
+    // If drone position data hasn't been received, return empty result
     if (!drone_position.data_received) {
         return result;
     }
     
-    // 无人机位置
+    // Drone position
     auto drone_point = std::make_tuple(drone_position.x, drone_position.y, drone_position.z);
     
-    // 遍历所有面
+    // Iterate through all faces
     for (const auto& face_entry : face_vertices_map) {
         const std::string& face_name = face_entry.first;
         const auto& face_vertices = face_entry.second;
         
-        // 计算无人机到当前面的最近点
-        auto nearest_point = nearestPointOnPolygon(drone_point, face_vertices);
+        // Need at least 3 vertices to form a face
+        if (face_vertices.size() < 3) {
+            continue;
+        }
         
-        // 计算距离
-        double x1, y1, z1, x2, y2, z2;
-        std::tie(x1, y1, z1) = drone_point;
-        std::tie(x2, y2, z2) = nearest_point;
-        double distance = std::sqrt((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1));
+        // Calculate face normal and a point on the face
+        double x0, y0, z0, x1, y1, z1, x2, y2, z2;
+        std::tie(x0, y0, z0) = face_vertices[0];
+        std::tie(x1, y1, z1) = face_vertices[1];
+        std::tie(x2, y2, z2) = face_vertices[2];
         
-        // 创建并添加结果
+        // Compute two vectors on the plane
+        double v1x = x1 - x0;
+        double v1y = y1 - y0;
+        double v1z = z1 - z0;
+        
+        double v2x = x2 - x0;
+        double v2y = y2 - y0;
+        double v2z = z2 - z0;
+        
+        // Compute face normal using cross product
+        double nx = v1y * v2z - v1z * v2y;
+        double ny = v1z * v2x - v1x * v2z;
+        double nz = v1x * v2y - v1y * v2x;
+        
+        // Normalize the normal
+        double norm = std::sqrt(nx*nx + ny*ny + nz*nz);
+        if (norm < 1e-10) {
+            // Degenerate face, skip it
+            continue;
+        }
+        
+        nx /= norm;
+        ny /= norm;
+        nz /= norm;
+        
+        // Calculate distance from drone to the face plane
+        double dx = drone_position.x - x0;
+        double dy = drone_position.y - y0;
+        double dz = drone_position.z - z0;
+        
+        // Calculate signed distance to the plane
+        double signed_distance = dx*nx + dy*ny + dz*nz;
+        
+        // Project the drone point onto the face plane
+        double projected_x = drone_position.x - signed_distance * nx;
+        double projected_y = drone_position.y - signed_distance * ny;
+        double projected_z = drone_position.z - signed_distance * nz;
+        
+        auto projected_point = std::make_tuple(projected_x, projected_y, projected_z);
+        
+        // Check if the projected point is inside the polygon
+        bool is_inside = isPointInPolygon(projected_point, face_vertices, nx, ny, nz);
+        
+        std::tuple<double, double, double> nearest_point;
+        double distance;
+        
+        if (is_inside) {
+            // If projected point is inside the face, it's the nearest point
+            nearest_point = projected_point;
+            distance = std::abs(signed_distance);
+        } else {
+            // If projected point is outside, find nearest point on boundary
+            nearest_point = nearestPointOnPolygon(drone_point, face_vertices);
+            
+            double np_x, np_y, np_z;
+            std::tie(np_x, np_y, np_z) = nearest_point;
+            
+            // Calculate Euclidean distance
+            distance = std::sqrt(
+                std::pow(np_x - drone_position.x, 2) + 
+                std::pow(np_y - drone_position.y, 2) + 
+                std::pow(np_z - drone_position.z, 2)
+            );
+        }
+        
+        // Create and add result
         NearestPointInfo info;
         info.face_name = face_name;
         info.nearest_point = nearest_point;
         info.distance = distance;
         
         result.push_back(info);
-    } 
-
+    }
+    
+    return result;
 }
+
 
 void printNearestPointsToFaces(const DronePosition& drone_position) {
-    // 计算最近点
+    // Calculate nearest points
     auto nearest_points = calculateNearestPointsToFaces(drone_position, face_vertices_map);
     
-    // // 打印结果
-    // std::cout << "===== 无人机到FOV面的最近点 =====" << std::endl;
-    // std::cout << "无人机位置: (" << drone_position.x << ", " 
-    //           << drone_position.y << ", " << drone_position.z << ")" << std::endl;
+    // Create a marker array to visualize the nearest points
+    visualization_msgs::MarkerArray marker_array;
     
-    // for (const auto& info : nearest_points) {
-    //     double x, y, z;
-    //     std::tie(x, y, z) = info.nearest_point;
+    for (size_t i = 0; i < nearest_points.size(); ++i) {
+        const auto& info = nearest_points[i];
+        double x, y, z;
+        std::tie(x, y, z) = info.nearest_point;
         
-    //     std::cout << "面 \"" << info.face_name << "\":" << std::endl;
-    //     std::cout << "  最近点: (" << x << ", " << y << ", " << z << ")" << std::endl;
-    //     std::cout << "  距离: " << info.distance << std::endl;
-    // }
+        // Create a marker for each nearest point
+        visualization_msgs::Marker marker;
+        marker.header.frame_id = "world"; // Use your actual frame
+        marker.header.stamp = ros::Time::now();
+        marker.ns = "nearest_points";
+        marker.id = i;
+        marker.type = visualization_msgs::Marker::SPHERE;
+        marker.action = visualization_msgs::Marker::ADD;
+        
+        // Set marker position
+        marker.pose.position.x = x;
+        marker.pose.position.y = y;
+        marker.pose.position.z = z;
+        marker.pose.orientation.w = 1.0;
+        
+        // Set marker scale
+        marker.scale.x = 0.2;
+        marker.scale.y = 0.2;
+        marker.scale.z = 0.2;
+        
+        // Set marker color (different color for each face)
+        float hue = static_cast<float>(i) / nearest_points.size();
+        
+        // Simple HSV to RGB conversion for distinct colors
+        float r, g, b;
+        if (hue < 1.0/3.0) {
+            r = 1.0;
+            g = 3.0 * hue;
+            b = 0.0;
+        } else if (hue < 2.0/3.0) {
+            r = 1.0 - 3.0 * (hue - 1.0/3.0);
+            g = 1.0;
+            b = 3.0 * (hue - 1.0/3.0);
+        } else {
+            r = 0.0;
+            g = 1.0 - 3.0 * (hue - 2.0/3.0);
+            b = 1.0;
+        }
+        
+        marker.color.r = r;
+        marker.color.g = g;
+        marker.color.b = b;
+        marker.color.a = 0.8; // Slightly transparent
+        
+        // Lifetime of marker
+        marker.lifetime = ros::Duration(1.0);
+        
+        // Add text marker to display the face name and distance
+        visualization_msgs::Marker text_marker;
+        text_marker.header = marker.header;
+        text_marker.ns = "nearest_points_text";
+        text_marker.id = i;
+        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+        text_marker.action = visualization_msgs::Marker::ADD;
+        
+        text_marker.pose.position.x = x;
+        text_marker.pose.position.y = y;
+        text_marker.pose.position.z = z + 0.3; // Position text above the point
+        text_marker.pose.orientation.w = 1.0;
+        
+        // Format text with face name and distance
+        std::stringstream ss;
+        ss << info.face_name << ": " << std::fixed << std::setprecision(2) << info.distance << "m";
+        text_marker.text = ss.str();
+        
+        text_marker.scale.z = 0.15; // Text size
+        text_marker.color.r = 1.0;
+        text_marker.color.g = 1.0;
+        text_marker.color.b = 1.0;
+        text_marker.color.a = 0.8;
+        text_marker.lifetime = ros::Duration(1.0);
+        
+        // Add markers to array
+        marker_array.markers.push_back(marker);
+        marker_array.markers.push_back(text_marker);
+    }
     
-    // std::cout << "===== 结束 =====" << std::endl;
+    // Publish markers if we have at least one point and the publisher is valid
+    if (!marker_array.markers.empty() && nearest_points_pub) {
+        nearest_points_pub.publish(marker_array);
+    }
 }
+
+
+// ----------------------------------Fov Faces----------------------------------
 
 // 解析 FovFaces 消息数据，返回面的顶点字典
 std::map<std::string, std::vector<geometry_msgs::Point>> parse_faces_data(const quadrotor_msgs::FovFaces::ConstPtr& data) {
@@ -307,7 +530,7 @@ void detectOccludedRegions() {
     
     // 如果没有检测到障碍物，直接返回
     if (obstacles.empty()) {
-        ROS_INFO("没有检测到障碍物");
+        ROS_INFO("no obstacles detected");
         return;
     }
 
@@ -530,6 +753,7 @@ void detectObstacles(){
  * @param initial_P 初始分布的协方差矩阵
  * @return 计算得到的权重向量
  */
+
 Eigen::VectorXd calculateKLBasedWeights(
     const Eigen::MatrixXd& mu,
     const std::vector<Eigen::MatrixXd>& P_full,
@@ -612,34 +836,6 @@ void fovFacesCallback(const quadrotor_msgs::FovFaces::ConstPtr& data) {
         face_vertices_map[face_name] = face_vertices;
     }
 
-    //  // 调试信息：打印所有面及其顶点
-    //  std::cout << "===== 调试信息：面顶点映射 =====" << std::endl;
-    //  std::cout << "总共有 " << face_vertices_map.size() << " 个面" << std::endl;
-     
-    //  for (const auto& face_entry : face_vertices_map) {
-    //      const std::string& face_name = face_entry.first;
-    //      const auto& vertices = face_entry.second;
-         
-    //      std::cout << "面 \"" << face_name << "\" 有 " << vertices.size() << " 个顶点:" << std::endl;
-         
-    //      for (size_t i = 0; i < vertices.size(); ++i) {
-    //          double x, y, z;
-    //          std::tie(x, y, z) = vertices[i];
-    //          std::cout << "  顶点 " << i << ": (" << x << ", " << y << ", " << z << ")" << std::endl;
-    //      }
-    //  }
-     
-    //  // 打印 face_coordinates_3d 中的顶点
-    //  std::cout << "\n===== 调试信息：face_coordinates_3d =====" << std::endl;
-    //  std::cout << "总共有 " << face_coordinates_3d.vertices.size() << " 个顶点" << std::endl;
-     
-    //  for (size_t i = 0; i < face_coordinates_3d.vertices.size(); ++i) {
-    //      double x, y, z;
-    //      std::tie(x, y, z) = face_coordinates_3d.vertices[i];
-    //      std::cout << "顶点 " << i << ": (" << x << ", " << y << ", " << z << ")" << std::endl;
-    //  }
-     
-    //  std::cout << "===== 调试信息结束 =====" << std::endl;
 }
 
 // 回调函数，当接收到ESDFMap消息时会被调用
@@ -682,6 +878,10 @@ int main(int argc, char** argv) {
     ros::init(argc, argv, "GMM_Planning_Test");
     ros::NodeHandle nh;
 
+    // Initialize publishers
+    nearest_points_pub = nh.advertise<visualization_msgs::MarkerArray>("/nearest_face_points", 1);
+
+
     // 订阅FovFaces话题
     ros::Subscriber fov_sub = nh.subscribe("/drone_0_traj_server/fov_faces", 10, fovFacesCallback);
 
@@ -702,7 +902,8 @@ int main(int argc, char** argv) {
             clipEsdfPointsToFov();
             detectObstacles();
             detectOccludedRegions();
-            // printNearestPointsToFaces(drone_position);
+
+            printNearestPointsToFaces(drone_position);
             
         rate.sleep();
         }
