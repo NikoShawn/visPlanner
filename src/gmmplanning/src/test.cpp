@@ -16,6 +16,8 @@
 
 ros::Publisher nearest_points_pub;
 
+ros::Publisher occlusion_viz_pub;
+
 // Global variables to store clustering results
 std::vector<std::vector<size_t>> obstacle_clusters;
 std::vector<size_t> obstacle_labels;
@@ -533,10 +535,30 @@ bool isPointInTriangle(double x, double y,
     return std::abs(sum - area) < 1e-9;
 }
 
+// 检查点(x,y)是否在线段(x1,y1)-(x2,y2)上
+bool isPointOnSegment(double x, double y, double x1, double y1, double x2, double y2) {
+    // 计算点到线段的距离
+    double line_length = std::sqrt(std::pow(x2 - x1, 2) + std::pow(y2 - y1, 2));
+    if (line_length < 1e-9) return false;  // 线段长度为0
+    
+    // 计算点到线的投影距离
+    double t = ((x - x1) * (x2 - x1) + (y - y1) * (y2 - y1)) / (line_length * line_length);
+    
+    // 如果投影在线段外，则点不在线段上
+    if (t < 0.0 || t > 1.0) return false;
+    
+    // 计算点到线段的垂直距离
+    double distance = std::abs((y2 - y1) * x - (x2 - x1) * y + x2 * y1 - y2 * x1) / line_length;
+    
+    // 如果垂直距离很小，则点在线段上
+    return distance < 1e-6;
+}
+
 // 使用射线法检测被障碍物遮挡的区域，并找出每个区域中离本机最近的点
 void detectOccludedRegions() {
     // 清空之前的结果
-    occluded_regions.clear();
+    // occluded_regions.clear();
+    obstacle_regions.clear();
     
     if (face_coordinates.vertices.size() < 3 || fov_esdf_points.empty()) {
         ROS_WARN("FOV vertices or ESDF points not initialized yet");
@@ -554,138 +576,315 @@ void detectOccludedRegions() {
     const auto& fov1 = face_coordinates.vertices[1];
     const auto& fov2 = face_coordinates.vertices[2];
     
-    // 计算fov1和fov2连成的直线方程 ax + by + c = 0
+    // 计算FOV边界线段的方程 ax + by + c = 0
     double a = fov2.second - fov1.second;  // y2 - y1
     double b = fov1.first - fov2.first;    // x1 - x2
     double c = fov2.first * fov1.second - fov1.first * fov2.second;  // x2*y1 - x1*y2
-
-    // 计算每个障碍物点相对于本机的角度
-    std::vector<std::pair<ESDFPoint, double>> obstacles_with_angles;
-    for (const auto& obs : obstacles) {
-        // 直接使用ESDFPoint的x和y成员
-        // 计算障碍物相对于本机的向量
-        double dx = obs.x - origin.first;  // 假设origin是std::pair<double, double>
-        double dy = obs.y - origin.second;
-        
-        // 计算角度（弧度），使用atan2确保角度在[-π, π]范围内
-        double angle = std::atan2(dy, dx);
-        
-        obstacles_with_angles.push_back({obs, angle});
-        
-    }
-
-    // 按照角度大小对障碍物点进行排序
-    std::sort(obstacles_with_angles.begin(), obstacles_with_angles.end(),
-    [](const auto& j, const auto& k) {
-        return j.second < k.second;
-    });
-
-    // 按照角度对障碍物点进行分类
-    std::vector<std::vector<std::pair<ESDFPoint, double>>> classified_obstacles;
-
-    // 角度阈值（可以根据需要调整）
-    const double angle_threshold = 0.1; // 约5.7度
     
-    if (!obstacles_with_angles.empty()) {
-        // 创建第一个障碍物类别
-        classified_obstacles.push_back({obstacles_with_angles[0]});
+    // 创建可视化标记数组
+    visualization_msgs::MarkerArray viz_markers;
+    int marker_id = 0;
+    
+    // 为每个聚类处理遮挡区域
+    for (size_t i = 0; i < obstacle_clusters.size(); i++) {
+        const auto& cluster = obstacle_clusters[i];
         
-        // 遍历剩余的障碍物点
-        for (size_t i = 1; i < obstacles_with_angles.size(); ++i) {
-            const auto& current = obstacles_with_angles[i];
-            const auto& previous = obstacles_with_angles[i-1];
+        // 跳过空集群
+        if (cluster.empty()) {
+            continue;
+        }
+        
+        // 找到此集群中的最小和最大角度点
+        double min_angle = std::numeric_limits<double>::max();
+        double max_angle = -std::numeric_limits<double>::max();
+        size_t min_angle_idx = cluster[0];
+        size_t max_angle_idx = cluster[0];
+        
+        // 遍历这个集群中的所有点
+        for (const auto& point_idx : cluster) {
+            // 计算这个点相对于原点的角度
+            double dx = obstacles[point_idx].x - origin.first;
+            double dy = obstacles[point_idx].y - origin.second;
+            double angle = std::atan2(dy, dx);
             
-            // 如果当前点与前一个点的角度差小于阈值，则归为同一类
-            if (std::abs(current.second - previous.second) < angle_threshold) {
-                classified_obstacles.back().push_back(current);
-            } else {
-                // 否则创建新的障碍物类别
-                classified_obstacles.push_back({current});
+            // 更新最小角度点
+            if (angle < min_angle) {
+                min_angle = angle;
+                min_angle_idx = point_idx;
+            }
+            
+            // 更新最大角度点
+            if (angle > max_angle) {
+                max_angle = angle;
+                max_angle_idx = point_idx;
             }
         }
-    }
-
-    // 提取每个障碍物中最大和最小角度的点
-    std::vector<std::pair<std::pair<ESDFPoint, double>, std::pair<ESDFPoint, double>>> obstacle_boundaries;
-
-    for (const auto& obstacle_group : classified_obstacles) {
-        // 由于已经按角度排序，第一个点是最小角度，最后一个点是最大角度
-        const auto& min_angle_point = obstacle_group.front();
-        const auto& max_angle_point = obstacle_group.back();
         
-        obstacle_boundaries.push_back({min_angle_point, max_angle_point});
-    }
-
-    // 清空之前的结果
-    obstacle_regions.clear();
-
-    // 计算每个障碍物边界点与原点组成的线和FOV边界直线的交点
-    for (size_t i = 0; i < obstacle_boundaries.size(); ++i) {
-        const auto& boundary = obstacle_boundaries[i];
-        const auto& min_point = boundary.first.first;  // 最小角度点的ESDFPoint
-        const auto& max_point = boundary.second.first; // 最大角度点的ESDFPoint
+        // 创建一个新的障碍区域
+        ObstacleRegion region(i+1, obstacles[min_angle_idx], obstacles[max_angle_idx]);
         
-        // 创建新的障碍物区域
-        ObstacleRegion region;
-        region.id = i;
-        region.min_angle_point = min_point;
-        region.max_angle_point = max_point;
+        // 计算从原点通过最小角度点的射线与FOV边界的交点
+        // 射线方程: y - y0 = m * (x - x0)，其中m是斜率
+        double x0 = origin.first;
+        double y0 = origin.second;
+        double x_min = obstacles[min_angle_idx].x;
+        double y_min = obstacles[min_angle_idx].y;
         
-        // 计算从原点到最小角度点的方向向量
-        double min_dx = min_point.x - origin.first;
-        double min_dy = min_point.y - origin.second;
+        // 计算射线斜率
+        double m_min = (y_min - y0) / (x_min - x0);
         
-        // 计算从原点到最大角度点的方向向量
-        double max_dx = max_point.x - origin.first;
-        double max_dy = max_point.y - origin.second;
-        
-        // 计算最小角度射线的交点
-        double min_t_denominator = a * min_dx + b * min_dy;
-        
-        if (std::abs(min_t_denominator) > 1e-6) {  // 避免除以零
-            double min_t = -(a * origin.first + b * origin.second + c) / min_t_denominator;
-            
-            // 只考虑射线前方的交点 (t > 0)
-            if (min_t > 0) {
-                double min_intersection_x = origin.first + min_t * min_dx;
-                double min_intersection_y = origin.second + min_t * min_dy;
-                
-                region.min_intersection = {min_intersection_x, min_intersection_y};
-            } else {
-                // 如果没有正向交点，可以设置一个默认值或标记
-                region.min_intersection = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()};
-            }
+        // 射线方程: y = m * (x - x0) + y0 => y = m*x - m*x0 + y0
+        // 代入FOV边界方程 ax + by + c = 0
+        // a*x + b*(m*x - m*x0 + y0) + c = 0
+        // x*(a + b*m) = b*m*x0 - b*y0 - c
+        double x_intersect_min, y_intersect_min;
+        if (std::abs(a + b*m_min) < 1e-9) {
+            // 射线与FOV边界平行，使用射线与FOV的延长线的交点
+            x_intersect_min = fov2.first + (fov2.first - fov1.first) * 10;
+            y_intersect_min = fov2.second + (fov2.second - fov1.second) * 10;
         } else {
-            // 如果射线与FOV边界平行或重合，可以设置一个默认值或标记
-            region.min_intersection = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()};
+            x_intersect_min = (b*m_min*x0 - b*y0 - c) / (a + b*m_min);
+            y_intersect_min = m_min * (x_intersect_min - x0) + y0;
         }
         
-        // 计算最大角度射线的交点
-        double max_t_denominator = a * max_dx + b * max_dy;
+        // 同样计算最大角度点的射线与FOV边界的交点
+        double x_max = obstacles[max_angle_idx].x;
+        double y_max = obstacles[max_angle_idx].y;
+        double m_max = (y_max - y0) / (x_max - x0);
         
-        if (std::abs(max_t_denominator) > 1e-6) {  // 避免除以零
-            double max_t = -(a * origin.first + b * origin.second + c) / max_t_denominator;
-            
-            // 只考虑射线前方的交点 (t > 0)
-            if (max_t > 0) {
-                double max_intersection_x = origin.first + max_t * max_dx;
-                double max_intersection_y = origin.second + max_t * max_dy;
-                
-                region.max_intersection = {max_intersection_x, max_intersection_y};
-            } else {
-                // 如果没有正向交点，可以设置一个默认值或标记
-                region.max_intersection = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()};
-            }
+        double x_intersect_max, y_intersect_max;
+        if (std::abs(a + b*m_max) < 1e-9) {
+            // 射线与FOV边界平行
+            x_intersect_max = fov2.first + (fov2.first - fov1.first) * 10;
+            y_intersect_max = fov2.second + (fov2.second - fov1.second) * 10;
         } else {
-            // 如果射线与FOV边界平行或重合，可以设置一个默认值或标记
-            region.max_intersection = {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN()};
+            x_intersect_max = (b*m_max*x0 - b*y0 - c) / (a + b*m_max);
+            y_intersect_max = m_max * (x_intersect_max - x0) + y0;
         }
         
-        // 将障碍物区域添加到全局变量
+        // 检查交点是否在FOV边界线段上
+        // 如果不在，则使用FOV的端点
+        bool min_on_segment = isPointOnSegment(x_intersect_min, y_intersect_min, 
+                                               fov1.first, fov1.second, 
+                                               fov2.first, fov2.second);
+                                               
+        bool max_on_segment = isPointOnSegment(x_intersect_max, y_intersect_max, 
+                                               fov1.first, fov1.second, 
+                                               fov2.first, fov2.second);
+        
+        // 存储交点到障碍区域
+        region.min_intersection = std::make_pair(x_intersect_min, y_intersect_min);
+        region.max_intersection = std::make_pair(x_intersect_max, y_intersect_max);
+        
+        // 添加到障碍区域列表
         obstacle_regions.push_back(region);
         
-        }
+        // 创建可视化标记
+        
+        // 1. 最小角度点标记
+        visualization_msgs::Marker min_marker;
+        min_marker.header.frame_id = "world";
+        min_marker.header.stamp = ros::Time::now();
+        min_marker.ns = "occlusion";
+        min_marker.id = marker_id++;
+        min_marker.type = visualization_msgs::Marker::SPHERE;
+        min_marker.action = visualization_msgs::Marker::ADD;
+        min_marker.pose.position.x = x_min;
+        min_marker.pose.position.y = y_min;
+        min_marker.pose.position.z = obstacles[min_angle_idx].z;
+        min_marker.pose.orientation.w = 1.0;
+        min_marker.scale.x = 0.15;
+        min_marker.scale.y = 0.15;
+        min_marker.scale.z = 0.15;
+        min_marker.color.r = 1.0;
+        min_marker.color.g = 0.0;
+        min_marker.color.b = 0.0;
+        min_marker.color.a = 1.0;
+        min_marker.lifetime = ros::Duration(1.0);
+        viz_markers.markers.push_back(min_marker);
+        
+        // 2. 最大角度点标记
+        visualization_msgs::Marker max_marker;
+        max_marker.header.frame_id = "world";
+        max_marker.header.stamp = ros::Time::now();
+        max_marker.ns = "occlusion";
+        max_marker.id = marker_id++;
+        max_marker.type = visualization_msgs::Marker::SPHERE;
+        max_marker.action = visualization_msgs::Marker::ADD;
+        max_marker.pose.position.x = x_max;
+        max_marker.pose.position.y = y_max;
+        max_marker.pose.position.z = obstacles[max_angle_idx].z;
+        max_marker.pose.orientation.w = 1.0;
+        max_marker.scale.x = 0.15;
+        max_marker.scale.y = 0.15;
+        max_marker.scale.z = 0.15;
+        max_marker.color.r = 0.0;
+        max_marker.color.g = 0.0;
+        max_marker.color.b = 1.0;
+        max_marker.color.a = 1.0;
+        max_marker.lifetime = ros::Duration(1.0);
+        viz_markers.markers.push_back(max_marker);
+        
+        // 3. 最小角度交点标记
+        visualization_msgs::Marker min_intersect_marker;
+        min_intersect_marker.header.frame_id = "world";
+        min_intersect_marker.header.stamp = ros::Time::now();
+        min_intersect_marker.ns = "occlusion";
+        min_intersect_marker.id = marker_id++;
+        min_intersect_marker.type = visualization_msgs::Marker::SPHERE;
+        min_intersect_marker.action = visualization_msgs::Marker::ADD;
+        min_intersect_marker.pose.position.x = x_intersect_min;
+        min_intersect_marker.pose.position.y = y_intersect_min;
+        min_intersect_marker.pose.position.z = obstacles[min_angle_idx].z;
+        min_intersect_marker.pose.orientation.w = 1.0;
+        min_intersect_marker.scale.x = 0.15;
+        min_intersect_marker.scale.y = 0.15;
+        min_intersect_marker.scale.z = 0.15;
+        min_intersect_marker.color.r = 1.0;
+        min_intersect_marker.color.g = 1.0;
+        min_intersect_marker.color.b = 0.0;
+        min_intersect_marker.color.a = 1.0;
+        min_intersect_marker.lifetime = ros::Duration(1.0);
+        viz_markers.markers.push_back(min_intersect_marker);
+        
+        // 4. 最大角度交点标记
+        visualization_msgs::Marker max_intersect_marker;
+        max_intersect_marker.header.frame_id = "world";
+        max_intersect_marker.header.stamp = ros::Time::now();
+        max_intersect_marker.ns = "occlusion";
+        max_intersect_marker.id = marker_id++;
+        max_intersect_marker.type = visualization_msgs::Marker::SPHERE;
+        max_intersect_marker.action = visualization_msgs::Marker::ADD;
+        max_intersect_marker.pose.position.x = x_intersect_max;
+        max_intersect_marker.pose.position.y = y_intersect_max;
+        max_intersect_marker.pose.position.z = obstacles[max_angle_idx].z;
+        max_intersect_marker.pose.orientation.w = 1.0;
+        max_intersect_marker.scale.x = 0.15;
+        max_intersect_marker.scale.y = 0.15;
+        max_intersect_marker.scale.z = 0.15;
+        max_intersect_marker.color.r = 0.0;
+        max_intersect_marker.color.g = 1.0;
+        max_intersect_marker.color.b = 1.0;
+        max_intersect_marker.color.a = 1.0;
+        max_intersect_marker.lifetime = ros::Duration(1.0);
+        viz_markers.markers.push_back(max_intersect_marker);
+        
+        // 7. 添加闭合区域（遮挡多边形）- 只包含四个关键点
+        visualization_msgs::Marker occluded_area;
+        occluded_area.header.frame_id = "world";
+        occluded_area.header.stamp = ros::Time::now();
+        occluded_area.ns = "occlusion";
+        occluded_area.id = marker_id++;
+        occluded_area.type = visualization_msgs::Marker::LINE_STRIP;
+        occluded_area.action = visualization_msgs::Marker::ADD;
+        occluded_area.pose.orientation.w = 1.0;
+        occluded_area.scale.x = 0.03;
+        occluded_area.color.r = 1.0;
+        occluded_area.color.g = 0.5;
+        occluded_area.color.b = 0.0;
+        occluded_area.color.a = 0.8;
+        occluded_area.lifetime = ros::Duration(1.0);
 
+        // 添加遮挡多边形的顶点 - 只使用四个点形成闭合四边形
+        geometry_msgs::Point min_pt, min_int, max_int, max_pt;
+
+        // 最小角度障碍点
+        min_pt.x = x_min;
+        min_pt.y = y_min;
+        min_pt.z = obstacles[min_angle_idx].z;
+
+        // 最小角度交点
+        min_int.x = x_intersect_min;
+        min_int.y = y_intersect_min;
+        min_int.z = obstacles[min_angle_idx].z;
+
+        // 最大角度交点
+        max_int.x = x_intersect_max;
+        max_int.y = y_intersect_max;
+        max_int.z = obstacles[max_angle_idx].z;
+
+        // 最大角度障碍点
+        max_pt.x = x_max;
+        max_pt.y = y_max;
+        max_pt.z = obstacles[max_angle_idx].z;
+
+        // 按顺时针或逆时针顺序添加点以形成闭合四边形
+        occluded_area.points.push_back(min_pt);     // 最小角度障碍点
+        occluded_area.points.push_back(min_int);    // 最小角度FOV交点
+        occluded_area.points.push_back(max_int);    // 最大角度FOV交点
+        occluded_area.points.push_back(max_pt);     // 最大角度障碍点
+        occluded_area.points.push_back(min_pt);     // 闭合回到起点
+
+        viz_markers.markers.push_back(occluded_area);
+
+        // 此外，添加一个填充的多边形来可视化遮挡区域
+        visualization_msgs::Marker filled_area;
+        filled_area.header.frame_id = "world";
+        filled_area.header.stamp = ros::Time::now();
+        filled_area.ns = "occlusion";
+        filled_area.id = marker_id++;
+        filled_area.type = visualization_msgs::Marker::TRIANGLE_LIST;
+        filled_area.action = visualization_msgs::Marker::ADD;
+        filled_area.pose.orientation.w = 1.0;
+        filled_area.scale.x = 1.0;
+        filled_area.scale.y = 1.0;
+        filled_area.scale.z = 1.0;
+        filled_area.color.r = 1.0;
+        filled_area.color.g = 0.5;
+        filled_area.color.b = 0.0;
+        filled_area.color.a = 0.3; // 半透明填充
+        filled_area.lifetime = ros::Duration(1.0);
+
+        // 三角剖分四边形（分成两个三角形）
+        // 三角形1: min_pt, min_int, max_int
+        filled_area.points.push_back(min_pt);
+        filled_area.points.push_back(min_int);
+        filled_area.points.push_back(max_int);
+
+        // 三角形2: min_pt, max_int, max_pt
+        filled_area.points.push_back(min_pt);
+        filled_area.points.push_back(max_int);
+        filled_area.points.push_back(max_pt);
+
+        viz_markers.markers.push_back(filled_area);
+        
+        // 8. 添加文本标签
+        visualization_msgs::Marker text_marker;
+        text_marker.header.frame_id = "world";
+        text_marker.header.stamp = ros::Time::now();
+        text_marker.ns = "occlusion";
+        text_marker.id = marker_id++;
+        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+        text_marker.action = visualization_msgs::Marker::ADD;
+        
+        // 在障碍物集群上方显示
+        double centroid_x = (x_min + x_max) / 2.0;
+        double centroid_y = (y_min + y_max) / 2.0;
+        double centroid_z = (obstacles[min_angle_idx].z + obstacles[max_angle_idx].z) / 2.0;
+        
+        text_marker.pose.position.x = centroid_x;
+        text_marker.pose.position.y = centroid_y;
+        text_marker.pose.position.z = centroid_z + 0.3;
+        text_marker.pose.orientation.w = 1.0;
+        
+        std::stringstream ss;
+        ss << "Obstacle " << (i+1) << " Region";
+        text_marker.text = ss.str();
+        
+        text_marker.scale.z = 0.2;
+        text_marker.color.r = 1.0;
+        text_marker.color.g = 1.0;
+        text_marker.color.b = 1.0;
+        text_marker.color.a = 1.0;
+        text_marker.lifetime = ros::Duration(1.0);
+        
+        viz_markers.markers.push_back(text_marker);
+    }
+    
+    // 发布标记以在RViz中显示
+    if (!viz_markers.markers.empty() && occlusion_viz_pub) {
+        occlusion_viz_pub.publish(viz_markers);
+    }
 }
 
 // 裁剪ESDF点，只保留在FOV区域内的点
@@ -717,7 +916,236 @@ void clipEsdfPointsToFov() {
     //          fov_esdf_points.size(), esdf_points.size());
 }
 
+// 计算目标点到遮挡区域的最近点并可视化
+void visualizeNearestPointsToOccludedRegions(const DronePosition& target_position) {
+    // 如果没有遮挡区域，直接返回
+    if (obstacle_regions.empty()) {
+        ROS_INFO("No occluded regions to calculate nearest points");
+        return;
+    }
 
+    // 创建可视化标记数组
+    visualization_msgs::MarkerArray viz_markers;
+    int marker_id = 0;
+    
+    // 获取目标的二维坐标
+    double target_x = target_position.x;
+    double target_y = target_position.y;
+    double target_z = target_position.z;  // 虽然只考虑二维，但我们用z坐标来显示
+    
+    // 创建一个标记显示目标点位置
+    visualization_msgs::Marker target_marker;
+    target_marker.header.frame_id = "world";
+    target_marker.header.stamp = ros::Time::now();
+    target_marker.ns = "occlusion_nearest";
+    target_marker.id = marker_id++;
+    target_marker.type = visualization_msgs::Marker::SPHERE;
+    target_marker.action = visualization_msgs::Marker::ADD;
+    target_marker.pose.position.x = target_x;
+    target_marker.pose.position.y = target_y;
+    target_marker.pose.position.z = target_z;
+    target_marker.pose.orientation.w = 1.0;
+    target_marker.scale.x = 0.25;
+    target_marker.scale.y = 0.25;
+    target_marker.scale.z = 0.25;
+    target_marker.color.r = 1.0;
+    target_marker.color.g = 1.0;
+    target_marker.color.b = 1.0;
+    target_marker.color.a = 1.0;
+    target_marker.lifetime = ros::Duration(1.0);
+    viz_markers.markers.push_back(target_marker);
+    
+    // 输出调试信息
+    ROS_INFO("Calculating nearest points from target (%.2f, %.2f) to %zu occluded regions", 
+             target_x, target_y, obstacle_regions.size());
+    
+    // 为每个遮挡区域找到最近点
+    for (size_t i = 0; i < obstacle_regions.size(); i++) {
+        const auto& region = obstacle_regions[i];
+        
+        // 获取遮挡区域的四个点（顺时针或逆时针顺序）
+        std::vector<std::pair<double, double>> polygon_points;
+        
+        // 最小角度障碍点
+        polygon_points.push_back(std::make_pair(region.min_angle_point.x, region.min_angle_point.y));
+        
+        // 最小角度交点
+        polygon_points.push_back(region.min_intersection);
+        
+        // 最大角度交点
+        polygon_points.push_back(region.max_intersection);
+        
+        // 最大角度障碍点
+        polygon_points.push_back(std::make_pair(region.max_angle_point.x, region.max_angle_point.y));
+        
+        // 计算目标点到多边形的最小距离和最近点
+        double min_distance = std::numeric_limits<double>::max();
+        std::pair<double, double> nearest_point;
+        double nearest_z = 0.0;  // 用于存储最近点的z坐标
+        
+        // 检查多边形的每条边
+        for (size_t j = 0; j < polygon_points.size(); j++) {
+            size_t next_j = (j + 1) % polygon_points.size();
+            const auto& p1 = polygon_points[j];
+            const auto& p2 = polygon_points[next_j];
+            
+            // 计算目标点到这条边的最近点
+            double edge_len_sq = std::pow(p2.first - p1.first, 2) + std::pow(p2.second - p1.second, 2);
+            if (edge_len_sq < 1e-10) continue; // 避免除以0
+            
+            // 计算投影参数t
+            double t = ((target_x - p1.first) * (p2.first - p1.first) + 
+                        (target_y - p1.second) * (p2.second - p1.second)) / edge_len_sq;
+            
+            // 限制t在[0,1]范围内（确保点在线段上）
+            t = std::max(0.0, std::min(1.0, t));
+            
+            // 计算最近点坐标
+            double nx = p1.first + t * (p2.first - p1.first);
+            double ny = p1.second + t * (p2.second - p1.second);
+            
+            // 计算距离
+            double dist = std::sqrt(std::pow(target_x - nx, 2) + std::pow(target_y - ny, 2));
+            
+            // 更新最小距离
+            if (dist < min_distance) {
+                min_distance = dist;
+                nearest_point = std::make_pair(nx, ny);
+                
+                // 估计z坐标（根据点的位置进行插值）
+                if (j == 0 || j == 3) {
+                    // 如果最近点在障碍物点上，使用障碍物点的z坐标
+                    nearest_z = (j == 0) ? region.min_angle_point.z : region.max_angle_point.z;
+                } else {
+                    // 如果在FOV边界上，使用障碍物点的z坐标（简单起见）
+                    nearest_z = (j == 1) ? region.min_angle_point.z : region.max_angle_point.z;
+                }
+            }
+        }
+        
+        // 检查目标点是否在多边形内部（点在内部时，它就是自己的最近点）
+        bool inside = false;
+        for (size_t j = 0, k = polygon_points.size() - 1; j < polygon_points.size(); k = j++) {
+            if (((polygon_points[j].second > target_y) != (polygon_points[k].second > target_y)) &&
+                (target_x < (polygon_points[k].first - polygon_points[j].first) * 
+                 (target_y - polygon_points[j].second) / (polygon_points[k].second - polygon_points[j].second) + 
+                 polygon_points[j].first)) {
+                inside = !inside;
+            }
+        }
+        
+        if (inside) {
+            nearest_point = std::make_pair(target_x, target_y);
+            min_distance = 0.0;
+            // 估算z坐标（在多边形内部时，使用障碍物点z的平均值）
+            nearest_z = (region.min_angle_point.z + region.max_angle_point.z) / 2.0;
+        }
+        
+        // 记录结果
+        ROS_INFO("Region %zu: Nearest point (%.2f, %.2f), distance: %.2f", 
+                 i+1, nearest_point.first, nearest_point.second, min_distance);
+        
+        // 可视化最近点
+        visualization_msgs::Marker point_marker;
+        point_marker.header.frame_id = "world";
+        point_marker.header.stamp = ros::Time::now();
+        point_marker.ns = "occlusion_nearest";
+        point_marker.id = marker_id++;
+        point_marker.type = visualization_msgs::Marker::SPHERE;
+        point_marker.action = visualization_msgs::Marker::ADD;
+        point_marker.pose.position.x = nearest_point.first;
+        point_marker.pose.position.y = nearest_point.second;
+        point_marker.pose.position.z = nearest_z;
+        point_marker.pose.orientation.w = 1.0;
+        point_marker.scale.x = 0.2;
+        point_marker.scale.y = 0.2;
+        point_marker.scale.z = 0.2;
+        // 使用不同颜色标识不同区域的最近点
+        float hue = static_cast<float>(i) / obstacle_regions.size();
+        float r, g, b;
+        if (hue < 1.0/3.0) {
+            r = 1.0;
+            g = 3.0 * hue;
+            b = 0.0;
+        } else if (hue < 2.0/3.0) {
+            r = 1.0 - 3.0 * (hue - 1.0/3.0);
+            g = 1.0;
+            b = 3.0 * (hue - 1.0/3.0);
+        } else {
+            r = 0.0;
+            g = 1.0 - 3.0 * (hue - 2.0/3.0);
+            b = 1.0;
+        }
+        point_marker.color.r = r;
+        point_marker.color.g = g;
+        point_marker.color.b = b;
+        point_marker.color.a = 1.0;
+        point_marker.lifetime = ros::Duration(1.0);
+        viz_markers.markers.push_back(point_marker);
+        
+        // 添加连接线
+        visualization_msgs::Marker line_marker;
+        line_marker.header.frame_id = "world";
+        line_marker.header.stamp = ros::Time::now();
+        line_marker.ns = "occlusion_nearest";
+        line_marker.id = marker_id++;
+        line_marker.type = visualization_msgs::Marker::LINE_STRIP;
+        line_marker.action = visualization_msgs::Marker::ADD;
+        line_marker.pose.orientation.w = 1.0;
+        line_marker.scale.x = 0.05;  // 线宽
+        line_marker.color = point_marker.color;
+        line_marker.color.a = 0.8;
+        line_marker.lifetime = ros::Duration(1.0);
+        
+        geometry_msgs::Point p1, p2;
+        p1.x = target_x;
+        p1.y = target_y;
+        p1.z = target_z;
+        p2.x = nearest_point.first;
+        p2.y = nearest_point.second;
+        p2.z = nearest_z;
+        
+        line_marker.points.push_back(p1);
+        line_marker.points.push_back(p2);
+        viz_markers.markers.push_back(line_marker);
+        
+        // 添加距离文本标签
+        visualization_msgs::Marker text_marker;
+        text_marker.header.frame_id = "world";
+        text_marker.header.stamp = ros::Time::now();
+        text_marker.ns = "occlusion_nearest";
+        text_marker.id = marker_id++;
+        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+        text_marker.action = visualization_msgs::Marker::ADD;
+        
+        // 文本位置（在连线中间位置稍微上方）
+        text_marker.pose.position.x = (target_x + nearest_point.first) / 2.0;
+        text_marker.pose.position.y = (target_y + nearest_point.second) / 2.0;
+        text_marker.pose.position.z = std::max(target_z, nearest_z) + 0.25;
+        text_marker.pose.orientation.w = 1.0;
+        
+        // 格式化距离文本
+        std::stringstream ss;
+        ss << "Region " << i+1 << ": " << std::fixed << std::setprecision(2) << min_distance << "m";
+        text_marker.text = ss.str();
+        
+        text_marker.scale.z = 0.15;  // 文本大小
+        text_marker.color.r = 1.0;
+        text_marker.color.g = 1.0;
+        text_marker.color.b = 1.0;
+        text_marker.color.a = 0.8;
+        text_marker.lifetime = ros::Duration(1.0);
+        viz_markers.markers.push_back(text_marker);
+    }
+    
+    // 发布可视化标记
+    static ros::Publisher nearest_occlusion_pub = 
+        ros::NodeHandle().advertise<visualization_msgs::MarkerArray>("/nearest_to_occlusion", 1);
+        
+    if (!viz_markers.markers.empty()) {
+        nearest_occlusion_pub.publish(viz_markers);
+    }
+}
 
 // DBSCAN algorithm for obstacle clustering
 std::vector<std::vector<size_t>> dbscanObstacles(
@@ -847,149 +1275,149 @@ void clusterObstacles(const std::vector<ESDFPoint>& obstacles, double eps = 0.5,
     // Log clustering results
     ROS_INFO("Found %zu obstacle clusters", obstacle_clusters.size());
     
-    // // Print number of points in each cluster
-    // for (size_t i = 0; i < clusters.size(); i++) {
-    //     ROS_INFO("Cluster %zu contains %zu points", i+1, clusters[i].size());
+    // Print number of points in each cluster
+    // for (size_t i = 0; i < obstacle_clusters.size(); i++) {
+    //     ROS_INFO("Cluster %zu contains %zu points", i+1, obstacle_clusters[i].size());
     // }
     
     // Count noise points
-    // size_t noiseCount = std::count(labels.begin(), labels.end(), 0);
+    size_t noiseCount = std::count(obstacle_labels.begin(), obstacle_labels.end(), 0);
     // ROS_INFO("Detected %zu noise points", noiseCount);
     
     // Visualize clusters in RViz
-    // visualization_msgs::MarkerArray cluster_markers;
-    // int marker_id = 0;
+    visualization_msgs::MarkerArray cluster_markers;
+    int marker_id = 0;
     
-    // // Create a marker for each cluster with a distinct color
-    // for (size_t i = 0; i < clusters.size(); ++i) {
-    //     // Choose a distinctive color for this cluster
-    //     float hue = static_cast<float>(i) / clusters.size();
-    //     float r, g, b;
+    // Create a marker for each cluster with a distinct color
+    for (size_t i = 0; i < obstacle_clusters.size(); ++i) {
+        // Choose a distinctive color for this cluster
+        float hue = static_cast<float>(i) / obstacle_clusters.size();
+        float r, g, b;
         
-    //     // Simple HSV to RGB conversion
-    //     if (hue < 1.0/3.0) {
-    //         r = 1.0;
-    //         g = 3.0 * hue;
-    //         b = 0.0;
-    //     } else if (hue < 2.0/3.0) {
-    //         r = 1.0 - 3.0 * (hue - 1.0/3.0);
-    //         g = 1.0;
-    //         b = 3.0 * (hue - 1.0/3.0);
-    //     } else {
-    //         r = 0.0;
-    //         g = 1.0 - 3.0 * (hue - 2.0/3.0);
-    //         b = 1.0;
-    //     }
+        // Simple HSV to RGB conversion
+        if (hue < 1.0/3.0) {
+            r = 1.0;
+            g = 3.0 * hue;
+            b = 0.0;
+        } else if (hue < 2.0/3.0) {
+            r = 1.0 - 3.0 * (hue - 1.0/3.0);
+            g = 1.0;
+            b = 3.0 * (hue - 1.0/3.0);
+        } else {
+            r = 0.0;
+            g = 1.0 - 3.0 * (hue - 2.0/3.0);
+            b = 1.0;
+        }
         
-    //     // Create a marker for points in this cluster
-    //     visualization_msgs::Marker points_marker;
-    //     points_marker.header.frame_id = "world"; // Use appropriate frame
-    //     points_marker.header.stamp = ros::Time::now();
-    //     points_marker.ns = "obstacle_clusters";
-    //     points_marker.id = marker_id++;
-    //     points_marker.type = visualization_msgs::Marker::POINTS;
-    //     points_marker.action = visualization_msgs::Marker::ADD;
-    //     points_marker.pose.orientation.w = 1.0;
-    //     points_marker.scale.x = 0.1;
-    //     points_marker.scale.y = 0.1;
-    //     points_marker.color.r = r;
-    //     points_marker.color.g = g;
-    //     points_marker.color.b = b;
-    //     points_marker.color.a = 1.0;
-    //     points_marker.lifetime = ros::Duration(1.0);
+        // Create a marker for points in this cluster
+        visualization_msgs::Marker points_marker;
+        points_marker.header.frame_id = "world"; // Use appropriate frame
+        points_marker.header.stamp = ros::Time::now();
+        points_marker.ns = "obstacle_clusters";
+        points_marker.id = marker_id++;
+        points_marker.type = visualization_msgs::Marker::POINTS;
+        points_marker.action = visualization_msgs::Marker::ADD;
+        points_marker.pose.orientation.w = 1.0;
+        points_marker.scale.x = 0.1;
+        points_marker.scale.y = 0.1;
+        points_marker.color.r = r;
+        points_marker.color.g = g;
+        points_marker.color.b = b;
+        points_marker.color.a = 1.0;
+        points_marker.lifetime = ros::Duration(1.0);
         
-    //     // Add all points in this cluster
-    //     for (auto point_idx : clusters[i]) {
-    //         geometry_msgs::Point p;
-    //         p.x = obstacles[point_idx].x;
-    //         p.y = obstacles[point_idx].y;
-    //         p.z = obstacles[point_idx].z;
-    //         points_marker.points.push_back(p);
-    //     }
+        // Add all points in this cluster
+        for (auto point_idx : obstacle_clusters[i]) {
+            geometry_msgs::Point p;
+            p.x = obstacles[point_idx].x;
+            p.y = obstacles[point_idx].y;
+            p.z = obstacles[point_idx].z;
+            points_marker.points.push_back(p);
+        }
         
-    //     cluster_markers.markers.push_back(points_marker);
+        cluster_markers.markers.push_back(points_marker);
         
-    //     // Create a text marker to label this cluster
-    //     visualization_msgs::Marker text_marker;
-    //     text_marker.header = points_marker.header;
-    //     text_marker.ns = "obstacle_cluster_labels";
-    //     text_marker.id = marker_id++;
-    //     text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
-    //     text_marker.action = visualization_msgs::Marker::ADD;
+        // Create a text marker to label this cluster
+        visualization_msgs::Marker text_marker;
+        text_marker.header = points_marker.header;
+        text_marker.ns = "obstacle_cluster_labels";
+        text_marker.id = marker_id++;
+        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+        text_marker.action = visualization_msgs::Marker::ADD;
         
-    //     // Calculate centroid of the cluster for text placement
-    //     double cx = 0, cy = 0, cz = 0;
-    //     for (auto point_idx : clusters[i]) {
-    //         cx += obstacles[point_idx].x;
-    //         cy += obstacles[point_idx].y;
-    //         cz += obstacles[point_idx].z;
-    //     }
-    //     cx /= clusters[i].size();
-    //     cy /= clusters[i].size();
-    //     cz /= clusters[i].size();
+        // Calculate centroid of the cluster for text placement
+        double cx = 0, cy = 0, cz = 0;
+        for (auto point_idx : obstacle_clusters[i]) {
+            cx += obstacles[point_idx].x;
+            cy += obstacles[point_idx].y;
+            cz += obstacles[point_idx].z;
+        }
+        cx /= obstacle_clusters[i].size();
+        cy /= obstacle_clusters[i].size();
+        cz /= obstacle_clusters[i].size();
         
-    //     text_marker.pose.position.x = cx;
-    //     text_marker.pose.position.y = cy;
-    //     text_marker.pose.position.z = cz + 0.2; // Slightly above the cluster
-    //     text_marker.pose.orientation.w = 1.0;
+        text_marker.pose.position.x = cx;
+        text_marker.pose.position.y = cy;
+        text_marker.pose.position.z = cz + 0.2; // Slightly above the cluster
+        text_marker.pose.orientation.w = 1.0;
         
-    //     std::stringstream ss;
-    //     ss << "Cluster " << (i + 1) << " (" << clusters[i].size() << " points)";
-    //     text_marker.text = ss.str();
+        std::stringstream ss;
+        ss << "Cluster " << (i + 1) << " (" << obstacle_clusters[i].size() << " points)";
+        text_marker.text = ss.str();
         
-    //     text_marker.scale.z = 0.15; // Text size
-    //     text_marker.color.r = 1.0;
-    //     text_marker.color.g = 1.0;
-    //     text_marker.color.b = 1.0;
-    //     text_marker.color.a = 1.0;
-    //     text_marker.lifetime = ros::Duration(1.0);
+        text_marker.scale.z = 0.15; // Text size
+        text_marker.color.r = 1.0;
+        text_marker.color.g = 1.0;
+        text_marker.color.b = 1.0;
+        text_marker.color.a = 1.0;
+        text_marker.lifetime = ros::Duration(1.0);
         
-    //     cluster_markers.markers.push_back(text_marker);
-    // }
+        cluster_markers.markers.push_back(text_marker);
+    }
     
-    // // Create a marker for noise points (if any)
-    // std::vector<size_t> noise_points;
-    // for (size_t i = 0; i < obstacles.size(); ++i) {
-    //     if (labels[i] == 0) {
-    //         noise_points.push_back(i);
-    //     }
-    // }
+    // Create a marker for noise points (if any)
+    std::vector<size_t> noise_points;
+    for (size_t i = 0; i < obstacles.size(); ++i) {
+        if (obstacle_labels[i] == 0) {
+            noise_points.push_back(i);
+        }
+    }
     
-    // if (!noise_points.empty()) {
-    //     visualization_msgs::Marker noise_marker;
-    //     noise_marker.header.frame_id = "world";
-    //     noise_marker.header.stamp = ros::Time::now();
-    //     noise_marker.ns = "obstacle_clusters";
-    //     noise_marker.id = marker_id++;
-    //     noise_marker.type = visualization_msgs::Marker::POINTS;
-    //     noise_marker.action = visualization_msgs::Marker::ADD;
-    //     noise_marker.pose.orientation.w = 1.0;
-    //     noise_marker.scale.x = 0.05;
-    //     noise_marker.scale.y = 0.05;
-    //     noise_marker.color.r = 0.5;
-    //     noise_marker.color.g = 0.5;
-    //     noise_marker.color.b = 0.5;
-    //     noise_marker.color.a = 0.5;
-    //     noise_marker.lifetime = ros::Duration(1.0);
+    if (!noise_points.empty()) {
+        visualization_msgs::Marker noise_marker;
+        noise_marker.header.frame_id = "world";
+        noise_marker.header.stamp = ros::Time::now();
+        noise_marker.ns = "obstacle_clusters";
+        noise_marker.id = marker_id++;
+        noise_marker.type = visualization_msgs::Marker::POINTS;
+        noise_marker.action = visualization_msgs::Marker::ADD;
+        noise_marker.pose.orientation.w = 1.0;
+        noise_marker.scale.x = 0.05;
+        noise_marker.scale.y = 0.05;
+        noise_marker.color.r = 0.5;
+        noise_marker.color.g = 0.5;
+        noise_marker.color.b = 0.5;
+        noise_marker.color.a = 0.5;
+        noise_marker.lifetime = ros::Duration(1.0);
         
-    //     for (auto point_idx : noise_points) {
-    //         geometry_msgs::Point p;
-    //         p.x = obstacles[point_idx].x;
-    //         p.y = obstacles[point_idx].y;
-    //         p.z = obstacles[point_idx].z;
-    //         noise_marker.points.push_back(p);
-    //     }
+        for (auto point_idx : noise_points) {
+            geometry_msgs::Point p;
+            p.x = obstacles[point_idx].x;
+            p.y = obstacles[point_idx].y;
+            p.z = obstacles[point_idx].z;
+            noise_marker.points.push_back(p);
+        }
         
-    //     cluster_markers.markers.push_back(noise_marker);
-    // }
+        cluster_markers.markers.push_back(noise_marker);
+    }
     
-    // // Publish the marker array
-    // static ros::Publisher cluster_pub = 
-    //     ros::NodeHandle().advertise<visualization_msgs::MarkerArray>("/obstacle_clusters", 1);
+    // Publish the marker array
+    static ros::Publisher cluster_pub = 
+        ros::NodeHandle().advertise<visualization_msgs::MarkerArray>("/obstacle_clusters", 1);
     
-    // if (!cluster_markers.markers.empty()) {
-    //     cluster_pub.publish(cluster_markers);
-    // }
+    if (!cluster_markers.markers.empty()) {
+        cluster_pub.publish(cluster_markers);
+    }
 }
 
 void detectObstacles(){
@@ -1150,7 +1578,8 @@ int main(int argc, char** argv) {
     // Initialize publishers
     nearest_points_pub = nh.advertise<visualization_msgs::MarkerArray>("/nearest_face_points", 1);
 
-
+    occlusion_viz_pub = nh.advertise<visualization_msgs::MarkerArray>("/occlusion_visualization", 1);
+    
     // 订阅FovFaces话题
     ros::Subscriber fov_sub = nh.subscribe("/drone_0_traj_server/fov_faces", 10, fovFacesCallback);
 
@@ -1171,7 +1600,10 @@ int main(int argc, char** argv) {
             clipEsdfPointsToFov();
             detectObstacles();
             detectOccludedRegions();
-
+            
+            // 计算并可视化目标点到遮挡区域的最近点
+            visualizeNearestPointsToOccludedRegions(drone_position);
+            
             printNearestPointsToFaces(drone_position);
             
         rate.sleep();
