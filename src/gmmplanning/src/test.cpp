@@ -13,6 +13,8 @@
 #include <cmath>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
+#include "BLTruncation.h"
+#include <tf2/LinearMath/Quaternion.h>
 
 ros::Publisher nearest_points_pub;
 
@@ -1822,6 +1824,199 @@ void visualizeTruncationLines(
     }
 }
 
+// Add this new function to visualize the truncated Gaussian distributions
+void visualizeTruncatedGaussians(
+    const std::vector<BLTrunc::TruncatedDistribution>& distributions,
+    double z_height) {
+    
+    // Create a marker array for visualization
+    visualization_msgs::MarkerArray marker_array;
+    int marker_id = 0;
+    
+    // Define colors for different distributions
+    std::vector<std::array<float, 3>> colors = {
+        {0.0, 0.7, 1.0},   // Original (blue)
+        {1.0, 0.0, 0.0},   // Red
+        {0.0, 1.0, 0.0},   // Green
+        {1.0, 0.5, 0.0},   // Orange
+        {1.0, 0.0, 1.0},   // Magenta
+        {0.0, 1.0, 1.0},   // Cyan
+        {0.5, 0.5, 1.0},   // Light blue
+        {1.0, 1.0, 0.0}    // Yellow
+    };
+    
+    // Visualize each truncated distribution
+    for (size_t i = 0; i < distributions.size(); ++i) {
+        const auto& dist = distributions[i];
+        
+        // Extract mean and covariance
+        double mean_x = dist.mu(0);
+        double mean_y = dist.mu(1);
+        double cov_xx = dist.Sigma(0, 0);
+        double cov_xy = dist.Sigma(0, 1);
+        double cov_yx = dist.Sigma(1, 0);
+        double cov_yy = dist.Sigma(1, 1);
+        
+        // Choose color based on distribution index
+        size_t color_idx = i % colors.size();
+        float r = colors[color_idx][0];
+        float g = colors[color_idx][1];
+        float b = colors[color_idx][2];
+        
+        // --- Create ellipse outline marker ---
+        visualization_msgs::Marker ellipse_marker;
+        ellipse_marker.header.frame_id = "world";
+        ellipse_marker.header.stamp = ros::Time::now();
+        ellipse_marker.ns = "truncated_gaussians";
+        ellipse_marker.id = marker_id++;
+        ellipse_marker.type = visualization_msgs::Marker::LINE_STRIP;
+        ellipse_marker.action = visualization_msgs::Marker::ADD;
+        ellipse_marker.pose.orientation.w = 1.0;
+        
+        ellipse_marker.scale.x = 0.03;  // Line width
+        ellipse_marker.color.r = r;
+        ellipse_marker.color.g = g;
+        ellipse_marker.color.b = b;
+        ellipse_marker.color.a = 0.8;
+        ellipse_marker.lifetime = ros::Duration(1.0);
+        
+        // For covariance with correlation, we need to compute eigenvalues/eigenvectors
+        Eigen::Matrix2d cov_matrix;
+        cov_matrix << cov_xx, cov_xy, cov_yx, cov_yy;
+        
+        // Perform eigen decomposition
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> eigen_solver(cov_matrix);
+        Eigen::Vector2d eigenvalues = eigen_solver.eigenvalues();
+        Eigen::Matrix2d eigenvectors = eigen_solver.eigenvectors();
+        
+        // Scale factors for 95% confidence ellipse (2 sigma)
+        double scale_x = 2.0 * std::sqrt(eigenvalues(0));
+        double scale_y = 2.0 * std::sqrt(eigenvalues(1));
+        
+        // Rotation angle from eigenvectors
+        double angle = std::atan2(eigenvectors(1, 0), eigenvectors(0, 0));
+        
+        // Create points for the 95% confidence ellipse
+        int num_points = 36;
+        for (int j = 0; j <= num_points; ++j) {
+            double theta = 2.0 * M_PI * j / num_points;
+            
+            // Point on unit circle
+            double x_unit = std::cos(theta);
+            double y_unit = std::sin(theta);
+            
+            // Scale by eigenvalues and rotate by eigenvectors
+            double x = mean_x + scale_x * x_unit * std::cos(angle) - scale_y * y_unit * std::sin(angle);
+            double y = mean_y + scale_x * x_unit * std::sin(angle) + scale_y * y_unit * std::cos(angle);
+            
+            geometry_msgs::Point p;
+            p.x = x;
+            p.y = y;
+            p.z = z_height;
+            
+            ellipse_marker.points.push_back(p);
+        }
+        
+        marker_array.markers.push_back(ellipse_marker);
+        
+        // --- Create filled ellipse marker ---
+        visualization_msgs::Marker filled_ellipse;
+        filled_ellipse.header.frame_id = "world";
+        filled_ellipse.header.stamp = ros::Time::now();
+        filled_ellipse.ns = "truncated_gaussians";
+        filled_ellipse.id = marker_id++;
+        filled_ellipse.type = visualization_msgs::Marker::CYLINDER;
+        filled_ellipse.action = visualization_msgs::Marker::ADD;
+        
+        filled_ellipse.pose.position.x = mean_x;
+        filled_ellipse.pose.position.y = mean_y;
+        filled_ellipse.pose.position.z = z_height - 0.05;  // Slightly below
+        
+        // Set orientation based on covariance eigenvectors
+        tf2::Quaternion q;
+        q.setRPY(0, 0, angle);
+        filled_ellipse.pose.orientation.x = q.x();
+        filled_ellipse.pose.orientation.y = q.y();
+        filled_ellipse.pose.orientation.z = q.z();
+        filled_ellipse.pose.orientation.w = q.w();
+        
+        // Scale for the ellipse
+        filled_ellipse.scale.x = 2.0 * scale_x;
+        filled_ellipse.scale.y = 2.0 * scale_y;
+        filled_ellipse.scale.z = 0.01;  // Very thin cylinder
+        
+        filled_ellipse.color.r = r;
+        filled_ellipse.color.g = g;
+        filled_ellipse.color.b = b;
+        filled_ellipse.color.a = 0.2;  // More transparent for filled area
+        filled_ellipse.lifetime = ros::Duration(1.0);
+        
+        marker_array.markers.push_back(filled_ellipse);
+        
+        // --- Create mean point marker ---
+        visualization_msgs::Marker mean_marker;
+        mean_marker.header.frame_id = "world";
+        mean_marker.header.stamp = ros::Time::now();
+        mean_marker.ns = "truncated_gaussians";
+        mean_marker.id = marker_id++;
+        mean_marker.type = visualization_msgs::Marker::SPHERE;
+        mean_marker.action = visualization_msgs::Marker::ADD;
+        
+        mean_marker.pose.position.x = mean_x;
+        mean_marker.pose.position.y = mean_y;
+        mean_marker.pose.position.z = z_height;
+        mean_marker.pose.orientation.w = 1.0;
+        
+        mean_marker.scale.x = 0.1;
+        mean_marker.scale.y = 0.1;
+        mean_marker.scale.z = 0.1;
+        
+        mean_marker.color.r = r;
+        mean_marker.color.g = g;
+        mean_marker.color.b = b;
+        mean_marker.color.a = 0.9;
+        
+        mean_marker.lifetime = ros::Duration(1.0);
+        marker_array.markers.push_back(mean_marker);
+        
+        // --- Create text label ---
+        visualization_msgs::Marker text_marker;
+        text_marker.header.frame_id = "world";
+        text_marker.header.stamp = ros::Time::now();
+        text_marker.ns = "truncated_gaussians";
+        text_marker.id = marker_id++;
+        text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+        text_marker.action = visualization_msgs::Marker::ADD;
+        
+        text_marker.pose.position.x = mean_x;
+        text_marker.pose.position.y = mean_y;
+        text_marker.pose.position.z = z_height + 0.3;
+        text_marker.pose.orientation.w = 1.0;
+        
+        std::stringstream ss;
+        ss << dist.label << ": (" << std::fixed << std::setprecision(2) 
+           << mean_x << ", " << mean_y << ")";
+        
+        text_marker.text = ss.str();
+        text_marker.scale.z = 0.15;
+        text_marker.color.r = r;
+        text_marker.color.g = g;
+        text_marker.color.b = b;
+        text_marker.color.a = 0.8;
+        text_marker.lifetime = ros::Duration(1.0);
+        
+        marker_array.markers.push_back(text_marker);
+    }
+    
+    // Publisher for truncated Gaussians
+    static ros::Publisher truncated_gaussians_pub = 
+        ros::NodeHandle().advertise<visualization_msgs::MarkerArray>("/truncated_gaussians", 1);
+        
+    if (!marker_array.markers.empty()) {
+        truncated_gaussians_pub.publish(marker_array);
+    }
+}
+
 void gaussiantruncation() {
     // Reset the global line equations
     truncation_lines.face_line_equations.clear();
@@ -1945,35 +2140,62 @@ void gaussiantruncation() {
     truncation_lines.data_available = !truncation_lines.face_line_equations.empty() || 
                                      !truncation_lines.occlusion_line_equations.empty();
     
-    if (!truncation_lines.data_available) {
-        ROS_INFO("No truncation lines data available");
-        return;
-    }
-
-    // ROS_INFO("===== Truncation Lines Data =====");
-    
-    // // Print face line equations
-    // ROS_INFO("Face truncation lines (%zu):", truncation_lines.face_line_equations.size());
-    // for (size_t i = 0; i < truncation_lines.face_line_equations.size(); ++i) {
-    //     const auto& line = truncation_lines.face_line_equations[i];
-    //     ROS_INFO("Face line %zu: %.4fx + %.4fy + %.4f = 0", 
-    //             i+1, line.a, line.b, line.c);
-    // }
-    
-    // // Print occlusion line equations
-    // ROS_INFO("Occlusion truncation lines (%zu):", truncation_lines.occlusion_line_equations.size());
-    // for (size_t i = 0; i < truncation_lines.occlusion_line_equations.size(); ++i) {
-    //     const auto& line = truncation_lines.occlusion_line_equations[i];
-    //     ROS_INFO("Occlusion line %zu: %.4fx + %.4fy + %.4f = 0", 
-    //             i+1, line.a, line.b, line.c);
-    // }
-    
-    // ROS_INFO("=================================");
 
     // Visualize the truncation lines (optional)
     if (truncation_lines.data_available) {
         visualizeTruncationLines(mean_x, mean_y, z_height, face_points_2d, occlusion_points_2d);
     }
+
+    // ======= BEGIN NEW CODE: Calculating truncated Gaussians =======
+    
+    // Only proceed if we have truncation lines
+    if (truncation_lines.data_available) {
+        // Convert 2D Gaussian parameters to Eigen types for BLTruncation
+        Eigen::VectorXd mu_0(2);
+        mu_0 << mean_x, mean_y;
+        
+        Eigen::MatrixXd Sigma_0(2, 2);
+        Sigma_0 << cov_x, 0.0,
+                   0.0, cov_y;
+        
+        // Combine all truncation lines (face and occlusion)
+        int total_lines = truncation_lines.face_line_equations.size() + 
+                          truncation_lines.occlusion_line_equations.size();
+        
+        // Create matrices to hold all truncation parameters
+        Eigen::MatrixXd A(total_lines, 2);
+        Eigen::VectorXd b(total_lines);
+        
+        // Fill matrix A and vector b with truncation line equations
+        int line_idx = 0;
+        
+        // Add face truncation lines
+        for (const auto& line : truncation_lines.face_line_equations) {
+            // Convert line equation ax + by + c = 0 to normal form for BLTruncation
+            // For BLTruncation: a^T * x <= b
+            // So we need: [a, b] * [x, y]^T <= -c
+            A(line_idx, 0) = line.a;
+            A(line_idx, 1) = line.b;
+            b(line_idx) = -line.c;  // Note the sign change
+            line_idx++;
+        }
+        
+        // Add occlusion truncation lines
+        for (const auto& line : truncation_lines.occlusion_line_equations) {
+            A(line_idx, 0) = line.a;
+            A(line_idx, 1) = line.b;
+            b(line_idx) = -line.c;
+            line_idx++;
+        }
+        
+        // Call BLTruncation to get individual truncated distributions
+        std::vector<BLTrunc::TruncatedDistribution> truncated_distributions = 
+            BLTrunc::IndividualTruncations(mu_0, Sigma_0, A, b);
+        
+        // Visualize all truncated Gaussians
+        visualizeTruncatedGaussians(truncated_distributions, z_height);
+    }
+    // ======= END NEW CODE =======
 
 }
 
@@ -2076,7 +2298,7 @@ int main(int argc, char** argv) {
     
     // ROS_INFO("Hello, ROS! Waiting for messages...");
     // 创建一个定时器，定期检查和处理esdf_points
-    ros::Rate rate(1); // 1Hz
+    ros::Rate rate(5); // 1Hz
     while (ros::ok()) {
         ros::spinOnce(); // 处理回调
 

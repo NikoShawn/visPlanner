@@ -29,6 +29,8 @@ catkin_package(
 # Find Eigen3
 find_package(Eigen3 REQUIRED)
 include_directories(${EIGEN3_INCLUDE_DIR})
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 ## Uncomment this if the package has a setup.py. This macro ensures
 ## modules and global scripts declared therein get installed
@@ -140,6 +142,7 @@ include_directories(
 
 add_executable(
   gmmplanning src/test.cpp
+  # gmmplanning src/BLTruncation.h
   )
 
 ## Add cmake target dependencies of the library
@@ -166,6 +169,8 @@ add_executable(
 target_link_libraries(${PROJECT_NAME}
   ${catkin_LIBRARIES}
   ${EIGEN3_LIBRARIES}
+  ${tf2_LIBRARIES}
+  ${tf2_ros_LIBRARIES}
 )
 
 #############
