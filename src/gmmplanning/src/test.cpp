@@ -18,6 +18,8 @@ ros::Publisher nearest_points_pub;
 
 ros::Publisher occlusion_viz_pub;
 
+ros::Publisher gaussian_2d_pub;
+
 // Global variables to store clustering results
 std::vector<std::vector<size_t>> obstacle_clusters;
 std::vector<size_t> obstacle_labels;
@@ -79,6 +81,25 @@ struct OccludedRegion {
         : closest_point(point), distance_to_origin(dist) {}
 };
 
+// 存储到遮挡区域的最近点信息
+struct OcclusionNearestPoint {
+    int region_id;                              // 遮挡区域ID
+    std::pair<double, double> nearest_point_2d; // 最近点(x,y)坐标
+    double z_coordinate;                        // z坐标 
+    double distance;                            // 到目标点的距离
+};
+
+// 全局变量存储遮挡区域的最近点信息
+struct GlobalOcclusionInfo {
+    std::vector<OcclusionNearestPoint> nearest_points;
+    bool data_available;
+    
+    GlobalOcclusionInfo() : data_available(false) {}
+};
+
+// 全局变量实例
+GlobalOcclusionInfo global_occlusion_nearest;
+
 // 全局变量存储被遮挡区域中离本机最近的点
 std::vector<std::pair<ESDFPoint, int>> occluded_regions;
 
@@ -121,6 +142,32 @@ struct NearestPointInfo {
     std::tuple<double, double, double> nearest_point;
     double distance;
 };
+
+// Define global Gaussian parameters
+struct GaussianParams2D {
+    double mean_x;
+    double mean_y;
+    double cov_x;
+    double cov_y;
+    double z_height;
+    bool initialized;
+    
+    GaussianParams2D() : mean_x(0), mean_y(0), cov_x(0.8), cov_y(0.8), z_height(0), initialized(false) {}
+};
+
+// Global variable for the Gaussian distribution
+GaussianParams2D drone_gaussian;
+
+// 全局变量存储到各个面的最近点信息
+struct GlobalNearestPoints {
+    std::vector<NearestPointInfo> nearest_points;
+    bool data_available;
+    
+    GlobalNearestPoints() : data_available(false) {}
+};
+
+// 全局变量实例
+GlobalNearestPoints global_nearest_points;
 
 // ----------------------------------Fov Faces----------------------------------
 
@@ -386,6 +433,10 @@ void printNearestPointsToFaces(const DronePosition& drone_position) {
     // Calculate nearest points
     auto nearest_points = calculateNearestPointsToFaces(drone_position, face_vertices_map);
     
+    // 将结果保存到全局变量
+    global_nearest_points.nearest_points = nearest_points;
+    global_nearest_points.data_available = !nearest_points.empty();
+
     // Create a marker array to visualize the nearest points
     visualization_msgs::MarkerArray marker_array;
     
@@ -478,7 +529,7 @@ void printNearestPointsToFaces(const DronePosition& drone_position) {
 }
 
 
-// ----------------------------------Fov Faces----------------------------------
+// ----------------------------------Occulated Faces----------------------------------
 
 // 解析 FovFaces 消息数据，返回面的顶点字典
 std::map<std::string, std::vector<geometry_msgs::Point>> parse_faces_data(const quadrotor_msgs::FovFaces::ConstPtr& data) {
@@ -919,6 +970,10 @@ void clipEsdfPointsToFov() {
 // 计算目标点到遮挡区域的最近点并可视化
 void visualizeNearestPointsToOccludedRegions(const DronePosition& target_position) {
     // 如果没有遮挡区域，直接返回
+    // 清空之前的结果
+    global_occlusion_nearest.nearest_points.clear();
+    global_occlusion_nearest.data_available = false;
+
     if (obstacle_regions.empty()) {
         ROS_INFO("No occluded regions to calculate nearest points");
         return;
@@ -1022,24 +1077,15 @@ void visualizeNearestPointsToOccludedRegions(const DronePosition& target_positio
                 }
             }
         }
+
+        // 记录结果到全局变量
+        OcclusionNearestPoint occlusion_point;
+        occlusion_point.region_id = region.id;
+        occlusion_point.nearest_point_2d = nearest_point;
+        occlusion_point.z_coordinate = nearest_z;
+        occlusion_point.distance = min_distance;
         
-        // 检查目标点是否在多边形内部（点在内部时，它就是自己的最近点）
-        bool inside = false;
-        for (size_t j = 0, k = polygon_points.size() - 1; j < polygon_points.size(); k = j++) {
-            if (((polygon_points[j].second > target_y) != (polygon_points[k].second > target_y)) &&
-                (target_x < (polygon_points[k].first - polygon_points[j].first) * 
-                 (target_y - polygon_points[j].second) / (polygon_points[k].second - polygon_points[j].second) + 
-                 polygon_points[j].first)) {
-                inside = !inside;
-            }
-        }
-        
-        if (inside) {
-            nearest_point = std::make_pair(target_x, target_y);
-            min_distance = 0.0;
-            // 估算z坐标（在多边形内部时，使用障碍物点z的平均值）
-            nearest_z = (region.min_angle_point.z + region.max_angle_point.z) / 2.0;
-        }
+        global_occlusion_nearest.nearest_points.push_back(occlusion_point);
         
         // 记录结果
         ROS_INFO("Region %zu: Nearest point (%.2f, %.2f), distance: %.2f", 
@@ -1495,6 +1541,165 @@ Eigen::VectorXd calculateKLBasedWeights(
     return beta;
 }
 
+//-----------------------------------------Gaussian-----------------------------------
+
+// Function to visualize a 2D Gaussian distribution at the drone's position
+void visualizeGaussian2DAtDronePosition(const DronePosition& drone_position) {
+    
+    // Create a marker array for visualization
+    visualization_msgs::MarkerArray marker_array;
+    
+    // Update global Gaussian parameters
+    drone_gaussian.mean_x = drone_position.x;
+    drone_gaussian.mean_y = drone_position.y;
+    drone_gaussian.z_height = drone_position.z;
+    drone_gaussian.initialized = true;
+
+    // Set parameters for the Gaussian
+    double mean_x = drone_position.x;
+    double mean_y = drone_position.y;
+    double z_height = drone_position.z;  // Use drone's height for visualization
+    
+    // Covariance matrix (diagonal elements = variance in x, y directions)
+    double cov_x = 1;  // 0.5m² variance in x direction
+    double cov_y = 1;  // 0.5m² variance in y direction
+    
+    // Number of points to visualize the ellipse (higher = smoother)
+    int num_points = 36;
+    
+    // Create a line strip marker to represent the 2D Gaussian ellipse
+    visualization_msgs::Marker ellipse_marker;
+    ellipse_marker.header.frame_id = "world";
+    ellipse_marker.header.stamp = ros::Time::now();
+    ellipse_marker.ns = "gaussian_distribution_2d";
+    ellipse_marker.id = 0;
+    ellipse_marker.type = visualization_msgs::Marker::LINE_STRIP;
+    ellipse_marker.action = visualization_msgs::Marker::ADD;
+    ellipse_marker.pose.orientation.w = 1.0;
+    
+    // Set line properties
+    ellipse_marker.scale.x = 0.03;  // Line width
+    ellipse_marker.color.r = 0.0;
+    ellipse_marker.color.g = 0.7;
+    ellipse_marker.color.b = 1.0;
+    ellipse_marker.color.a = 0.8;
+    ellipse_marker.lifetime = ros::Duration(1.0);
+    
+    // Create points for the 95% confidence ellipse (2 sigma)
+    for (int i = 0; i <= num_points; ++i) {
+        double theta = 2.0 * M_PI * i / num_points;
+        
+        // Coordinates on unit circle
+        double x_unit = std::cos(theta);
+        double y_unit = std::sin(theta);
+        
+        // Scale by 2*sigma in each direction (95% confidence interval)
+        double x = mean_x + 2.0 * std::sqrt(cov_x) * x_unit;
+        double y = mean_y + 2.0 * std::sqrt(cov_y) * y_unit;
+        
+        geometry_msgs::Point p;
+        p.x = x;
+        p.y = y;
+        p.z = z_height;
+        
+        ellipse_marker.points.push_back(p);
+    }
+    
+    marker_array.markers.push_back(ellipse_marker);
+    
+    // Create a filled circle to represent the Gaussian
+    visualization_msgs::Marker filled_ellipse;
+    filled_ellipse.header.frame_id = "world";
+    filled_ellipse.header.stamp = ros::Time::now();
+    filled_ellipse.ns = "gaussian_distribution_2d";
+    filled_ellipse.id = 1;
+    filled_ellipse.type = visualization_msgs::Marker::CYLINDER;
+    filled_ellipse.action = visualization_msgs::Marker::ADD;
+    
+    filled_ellipse.pose.position.x = mean_x;
+    filled_ellipse.pose.position.y = mean_y;
+    filled_ellipse.pose.position.z = z_height - 0.05;  // Slightly below the actual height
+    filled_ellipse.pose.orientation.w = 1.0;
+    
+    // Set the scale for the cylinder to represent the 2D Gaussian
+    filled_ellipse.scale.x = 2.0 * 2.0 * std::sqrt(cov_x);  // Diameter = 2*2*sigma
+    filled_ellipse.scale.y = 2.0 * 2.0 * std::sqrt(cov_y);
+    filled_ellipse.scale.z = 0.01;  // Very thin to be essentially 2D
+    
+    // Semi-transparent blue
+    filled_ellipse.color.r = 0.0;
+    filled_ellipse.color.g = 0.5;
+    filled_ellipse.color.b = 1.0;
+    filled_ellipse.color.a = 0.3;
+    
+    filled_ellipse.lifetime = ros::Duration(1.0);
+    marker_array.markers.push_back(filled_ellipse);
+    
+    // Add a marker for the mean
+    visualization_msgs::Marker mean_marker;
+    mean_marker.header.frame_id = "world";
+    mean_marker.header.stamp = ros::Time::now();
+    mean_marker.ns = "gaussian_distribution_2d";
+    mean_marker.id = 2;
+    mean_marker.type = visualization_msgs::Marker::SPHERE;
+    mean_marker.action = visualization_msgs::Marker::ADD;
+    
+    mean_marker.pose.position.x = mean_x;
+    mean_marker.pose.position.y = mean_y;
+    mean_marker.pose.position.z = z_height;
+    mean_marker.pose.orientation.w = 1.0;
+    
+    mean_marker.scale.x = 0.1;
+    mean_marker.scale.y = 0.1;
+    mean_marker.scale.z = 0.1;
+    
+    mean_marker.color.r = 1.0;
+    mean_marker.color.g = 1.0;
+    mean_marker.color.b = 0.0;
+    mean_marker.color.a = 0.9;
+    
+    mean_marker.lifetime = ros::Duration(1.0);
+    marker_array.markers.push_back(mean_marker);
+    
+    // Add text label
+    visualization_msgs::Marker text_marker;
+    text_marker.header.frame_id = "world";
+    text_marker.header.stamp = ros::Time::now();
+    text_marker.ns = "gaussian_distribution_2d";
+    text_marker.id = 3;
+    text_marker.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+    text_marker.action = visualization_msgs::Marker::ADD;
+    
+    text_marker.pose.position.x = mean_x;
+    text_marker.pose.position.y = mean_y;
+    text_marker.pose.position.z = z_height + 0.3;
+    text_marker.pose.orientation.w = 1.0;
+    
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(2) 
+       << "Gaussian 2D: (" << mean_x << ", " << mean_y << ")";
+    
+    text_marker.text = ss.str();
+    text_marker.scale.z = 0.15;
+    text_marker.color.r = 1.0;
+    text_marker.color.g = 1.0;
+    text_marker.color.b = 1.0;
+    text_marker.color.a = 0.8;
+    text_marker.lifetime = ros::Duration(1.0);
+    
+    marker_array.markers.push_back(text_marker);
+    
+    // 添加这行代码来发布标记数组
+    gaussian_2d_pub.publish(marker_array);
+}
+
+void gaussiantruncation(){
+    
+}
+
+
+
+//-----------------------------------------Callback Functions-----------------------------------------//
 // FOV 话题回调函数，解析数据并更新全局变量 `faces`
 void fovFacesCallback(const quadrotor_msgs::FovFaces::ConstPtr& data) {
     
@@ -1580,6 +1785,8 @@ int main(int argc, char** argv) {
 
     occlusion_viz_pub = nh.advertise<visualization_msgs::MarkerArray>("/occlusion_visualization", 1);
     
+    gaussian_2d_pub = nh.advertise<visualization_msgs::MarkerArray>("/drone_gaussian_2d", 1);
+
     // 订阅FovFaces话题
     ros::Subscriber fov_sub = nh.subscribe("/drone_0_traj_server/fov_faces", 10, fovFacesCallback);
 
@@ -1606,6 +1813,9 @@ int main(int argc, char** argv) {
             
             printNearestPointsToFaces(drone_position);
             
+            // Visualize 2D Gaussian distribution at the drone's position
+            visualizeGaussian2DAtDronePosition(drone_position);
+
         rate.sleep();
         }
     }

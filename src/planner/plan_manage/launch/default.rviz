@@ -19,8 +19,6 @@ Panels:
         - /target1/Simulation1
         - /target1/Simulation1/robot1
         - /TF1/Frames1
-        - /MarkerArray5
-        - /MarkerArray5/Status1
         - /MarkerArray5/Namespaces1
       Splitter Ratio: 0.43611112236976624
     Tree Height: 579
@@ -567,6 +565,22 @@ Visualization Manager:
         occlusion: true
       Queue Size: 100
       Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /nearest_to_occlusion
+      Name: MarkerArray
+      Namespaces:
+        occlusion_nearest: true
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /drone_gaussian_2d
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 255; 255; 255
@@ -596,7 +610,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/ThirdPersonFollower
-      Distance: 6.7419538497924805
+      Distance: 7.964780807495117
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -604,17 +618,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: -10.476102828979492
-        Y: -2.475308418273926
-        Z: 0.8296120166778564
+        X: -15.65658187866211
+        Y: -0.06788420677185059
+        Z: 0.8296194076538086
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.4097964763641357
+      Pitch: 1.4997966289520264
       Target Frame: world
-      Yaw: 2.3823089599609375
+      Yaw: 3.847336530685425
     Saved:
       - Class: rviz/FPS
         Enable Stereo Rendering:
@@ -685,7 +699,7 @@ Window Geometry:
   Views:
     collapsed: false
   Width: 1080
-  X: 368
-  Y: 180
+  X: 1920
+  Y: 463
   depth:
     collapsed: false
