@@ -169,6 +169,25 @@ struct GlobalNearestPoints {
 // 全局变量实例
 GlobalNearestPoints global_nearest_points;
 
+// Add at the top with other global variables
+struct LineEquation {
+    double a;  // coefficient of x (in ax + by + c = 0)
+    double b;  // coefficient of y
+    double c;  // constant term
+};
+
+// Global variables to store line equations
+struct TruncationLines {
+    std::vector<LineEquation> face_line_equations;
+    std::vector<LineEquation> occlusion_line_equations;
+    bool data_available;
+    
+    TruncationLines() : data_available(false) {}
+};
+
+// Global instance
+TruncationLines truncation_lines;
+
 // ----------------------------------Fov Faces----------------------------------
 
 // 计算点到线段的最近点
@@ -969,8 +988,6 @@ void clipEsdfPointsToFov() {
 
 // 计算目标点到遮挡区域的最近点并可视化
 void visualizeNearestPointsToOccludedRegions(const DronePosition& target_position) {
-    // 如果没有遮挡区域，直接返回
-    // 清空之前的结果
     global_occlusion_nearest.nearest_points.clear();
     global_occlusion_nearest.data_available = false;
 
@@ -1010,9 +1027,6 @@ void visualizeNearestPointsToOccludedRegions(const DronePosition& target_positio
     target_marker.lifetime = ros::Duration(1.0);
     viz_markers.markers.push_back(target_marker);
     
-    // 输出调试信息
-    ROS_INFO("Calculating nearest points from target (%.2f, %.2f) to %zu occluded regions", 
-             target_x, target_y, obstacle_regions.size());
     
     // 为每个遮挡区域找到最近点
     for (size_t i = 0; i < obstacle_regions.size(); i++) {
@@ -1086,10 +1100,8 @@ void visualizeNearestPointsToOccludedRegions(const DronePosition& target_positio
         occlusion_point.distance = min_distance;
         
         global_occlusion_nearest.nearest_points.push_back(occlusion_point);
-        
-        // 记录结果
-        ROS_INFO("Region %zu: Nearest point (%.2f, %.2f), distance: %.2f", 
-                 i+1, nearest_point.first, nearest_point.second, min_distance);
+        // Add this line at the end of the function
+        global_occlusion_nearest.data_available = !global_occlusion_nearest.nearest_points.empty();
         
         // 可视化最近点
         visualization_msgs::Marker point_marker;
@@ -1319,7 +1331,7 @@ void clusterObstacles(const std::vector<ESDFPoint>& obstacles, double eps = 0.5,
     obstacle_labels = labelObstacles(obstacle_clusters, obstacles.size());
     
     // Log clustering results
-    ROS_INFO("Found %zu obstacle clusters", obstacle_clusters.size());
+    // ROS_INFO("Found %zu obstacle clusters", obstacle_clusters.size());
     
     // Print number of points in each cluster
     // for (size_t i = 0; i < obstacle_clusters.size(); i++) {
@@ -1545,7 +1557,7 @@ Eigen::VectorXd calculateKLBasedWeights(
 
 // Function to visualize a 2D Gaussian distribution at the drone's position
 void visualizeGaussian2DAtDronePosition(const DronePosition& drone_position) {
-    
+
     // Create a marker array for visualization
     visualization_msgs::MarkerArray marker_array;
     
@@ -1693,11 +1705,277 @@ void visualizeGaussian2DAtDronePosition(const DronePosition& drone_position) {
     gaussian_2d_pub.publish(marker_array);
 }
 
-void gaussiantruncation(){
+void visualizeTruncationLines(
+    double mean_x, double mean_y, double z_height,
+    const std::vector<std::pair<double, double>>& face_points,
+    const std::vector<std::pair<double, double>>& occlusion_points) {
     
+    // Create marker array for visualization
+    visualization_msgs::MarkerArray marker_array;
+    int marker_id = 0;
+    
+    // Determine how far to extend the lines (based on Gaussian scale)
+    double line_length = 4.0 * std::max(std::sqrt(drone_gaussian.cov_x), std::sqrt(drone_gaussian.cov_y));
+    
+    // Visualize face truncation lines
+    for (size_t i = 0; i < truncation_lines.face_line_equations.size(); ++i) {
+        const auto& line = truncation_lines.face_line_equations[i];
+        const auto& point = face_points[i];
+        
+        // Create line marker
+        visualization_msgs::Marker line_marker;
+        line_marker.header.frame_id = "world";
+        line_marker.header.stamp = ros::Time::now();
+        line_marker.ns = "truncation_lines";
+        line_marker.id = marker_id++;
+        line_marker.type = visualization_msgs::Marker::LINE_STRIP;
+        line_marker.action = visualization_msgs::Marker::ADD;
+        line_marker.pose.orientation.w = 1.0;
+        line_marker.scale.x = 0.02;  // Line width
+        line_marker.color.r = 0.2;
+        line_marker.color.g = 0.8;
+        line_marker.color.b = 0.2;
+        line_marker.color.a = 0.8;
+        line_marker.lifetime = ros::Duration(1.0);
+        
+        // Calculate two points on the line to draw it
+        // Line equation is ax + by + c = 0
+        // If b is not too small, we can use y = (-ax - c)/b
+        // Otherwise, we use x = (-by - c)/a
+        
+        geometry_msgs::Point p1, p2;
+        if (std::abs(line.b) > 1e-6) {
+            // Use two different x values and compute corresponding y values
+            double x1 = point.first - line_length;
+            double x2 = point.first + line_length;
+            double y1 = (-line.a * x1 - line.c) / line.b;
+            double y2 = (-line.a * x2 - line.c) / line.b;
+            
+            p1.x = x1; p1.y = y1; p1.z = z_height;
+            p2.x = x2; p2.y = y2; p2.z = z_height;
+        } else {
+            // Use two different y values and compute corresponding x values
+            double y1 = point.second - line_length;
+            double y2 = point.second + line_length;
+            double x1 = (-line.b * y1 - line.c) / line.a;
+            double x2 = (-line.b * y2 - line.c) / line.a;
+            
+            p1.x = x1; p1.y = y1; p1.z = z_height;
+            p2.x = x2; p2.y = y2; p2.z = z_height;
+        }
+        
+        line_marker.points.push_back(p1);
+        line_marker.points.push_back(p2);
+        marker_array.markers.push_back(line_marker);
+    }
+    
+    // Visualize occlusion truncation lines
+    for (size_t i = 0; i < truncation_lines.occlusion_line_equations.size(); ++i) {
+        const auto& line = truncation_lines.occlusion_line_equations[i];
+        const auto& point = occlusion_points[i];
+        
+        visualization_msgs::Marker line_marker;
+        line_marker.header.frame_id = "world";
+        line_marker.header.stamp = ros::Time::now();
+        line_marker.ns = "truncation_lines";
+        line_marker.id = marker_id++;
+        line_marker.type = visualization_msgs::Marker::LINE_STRIP;
+        line_marker.action = visualization_msgs::Marker::ADD;
+        line_marker.pose.orientation.w = 1.0;
+        line_marker.scale.x = 0.02;  // Line width
+        line_marker.color.r = 0.8;
+        line_marker.color.g = 0.2;
+        line_marker.color.b = 0.2;
+        line_marker.color.a = 0.8;
+        line_marker.lifetime = ros::Duration(1.0);
+        
+        geometry_msgs::Point p1, p2;
+        if (std::abs(line.b) > 1e-6) {
+            double x1 = point.first - line_length;
+            double x2 = point.first + line_length;
+            double y1 = (-line.a * x1 - line.c) / line.b;
+            double y2 = (-line.a * x2 - line.c) / line.b;
+            
+            p1.x = x1; p1.y = y1; p1.z = z_height;
+            p2.x = x2; p2.y = y2; p2.z = z_height;
+        } else {
+            double y1 = point.second - line_length;
+            double y2 = point.second + line_length;
+            double x1 = (-line.b * y1 - line.c) / line.a;
+            double x2 = (-line.b * y2 - line.c) / line.a;
+            
+            p1.x = x1; p1.y = y1; p1.z = z_height;
+            p2.x = x2; p2.y = y2; p2.z = z_height;
+        }
+        
+        line_marker.points.push_back(p1);
+        line_marker.points.push_back(p2);
+        marker_array.markers.push_back(line_marker);
+    }
+    
+    // Publisher for truncation lines
+    static ros::Publisher truncation_lines_pub = 
+        ros::NodeHandle().advertise<visualization_msgs::MarkerArray>("/truncation_lines", 1);
+        
+    if (!marker_array.markers.empty()) {
+        truncation_lines_pub.publish(marker_array);
+    }
 }
 
+void gaussiantruncation() {
+    // Reset the global line equations
+    truncation_lines.face_line_equations.clear();
+    truncation_lines.occlusion_line_equations.clear();
+    truncation_lines.data_available = false;
+    
+    if (!drone_gaussian.initialized) {
+        ROS_WARN("Gaussian distribution not initialized yet");
+        return;
+    }
 
+    double mean_x = drone_gaussian.mean_x;
+    double mean_y = drone_gaussian.mean_y;
+    double z_height = drone_gaussian.z_height;
+    double cov_x = drone_gaussian.cov_x;
+    double cov_y = drone_gaussian.cov_y;
+    double std_x = std::sqrt(cov_x);
+    double std_y = std::sqrt(cov_y);
+
+    printf("Gaussian mean: (%.2f, %.2f, %.2f)\n", mean_x, mean_y, z_height);
+    printf("Gaussian covariance: (%.2f, %.2f)\n", cov_x, cov_y);
+
+    std::vector<NearestPointInfo> face_nearest_points;
+    std::vector<std::pair<double, double>> face_points_2d;
+    
+    if (global_nearest_points.data_available) {
+        face_nearest_points.clear();
+        face_points_2d.clear();  // Clear the 2D points container before filling it
+    
+        // Get all nearest points first
+        face_nearest_points = global_nearest_points.nearest_points;
+        
+        // Create a filtered vector excluding face2 and face4
+        std::vector<NearestPointInfo> filtered_points;
+        for (const auto& info : face_nearest_points) {
+            // Skip face2 and face4
+            if (info.face_name == "face2" || info.face_name == "face4") {
+                continue;
+            }
+            filtered_points.push_back(info);
+            
+            // Extract the x,y coordinates from the nearest point tuple
+            double x, y, z;
+            std::tie(x, y, z) = info.nearest_point;
+            
+            // Store just the x,y coordinates in face_points_2d
+            face_points_2d.push_back(std::make_pair(x, y));
+            
+            // Calculate perpendicular line equation
+            // Vector from mean to point: (x-mean_x, y-mean_y)
+            double dx = x - mean_x;
+            double dy = y - mean_y;
+            
+            // Perpendicular vector: (-dy, dx)
+            // Line equation ax + by + c = 0, where:
+            // a = -dy, b = dx, c = dy*x - dx*y = dy*mean_x - dx*mean_y
+            LineEquation line;
+            line.a = dx;  // Use original direction as tangent vector
+            line.b = dy;
+            line.c = -(dx*x + dy*y);  // Ensure the line passes through (x,y)
+            
+            // Normalize the equation so a²+b²=1
+            double norm = std::sqrt(line.a*line.a + line.b*line.b);
+            if (norm > 1e-10) {  // Avoid division by zero
+                line.a /= norm;
+                line.b /= norm;
+                line.c /= norm;
+            }
+            
+            // Store the line equation
+            truncation_lines.face_line_equations.push_back(line);
+        }
+        
+        // Replace with filtered vector
+        face_nearest_points = filtered_points;
+        
+        // ROS_INFO("Calculated %zu face truncation lines", truncation_lines.face_line_equations.size());
+    }
+
+    std::vector<std::pair<double, double>> occlusion_points_2d;
+
+    if (global_occlusion_nearest.data_available) {
+        occlusion_points_2d.clear();
+        
+        for (const auto& point : global_occlusion_nearest.nearest_points) {
+            // Store just the x,y coordinates
+            double x = point.nearest_point_2d.first;
+            double y = point.nearest_point_2d.second;
+            
+            occlusion_points_2d.push_back(std::make_pair(x, y));
+            
+            // Calculate perpendicular line equation
+            // Vector from mean to point: (x-mean_x, y-mean_y)
+            double dx = x - mean_x;
+            double dy = y - mean_y;
+            
+            // Perpendicular vector: (-dy, dx)
+            // Line equation ax + by + c = 0, where:
+            // a = -dy, b = dx, c = dy*x - dx*y = dy*mean_x - dx*mean_y
+            LineEquation line;
+            line.a = dx;  // Use original direction as tangent vector
+            line.b = dy;
+            line.c = -(dx*x + dy*y);  // Ensure the line passes through (x,y)
+            
+            // Normalize the equation so a²+b²=1
+            double norm = std::sqrt(line.a*line.a + line.b*line.b);
+            if (norm > 1e-10) {  // Avoid division by zero
+                line.a /= norm;
+                line.b /= norm;
+                line.c /= norm;
+            }
+            
+            // Store the line equation
+            truncation_lines.occlusion_line_equations.push_back(line);
+        }
+        
+        // ROS_INFO("Calculated %zu occlusion truncation lines", truncation_lines.occlusion_line_equations.size());
+    }
+    
+    // Set data available flag if we have any line equations
+    truncation_lines.data_available = !truncation_lines.face_line_equations.empty() || 
+                                     !truncation_lines.occlusion_line_equations.empty();
+    
+    if (!truncation_lines.data_available) {
+        ROS_INFO("No truncation lines data available");
+        return;
+    }
+
+    // ROS_INFO("===== Truncation Lines Data =====");
+    
+    // // Print face line equations
+    // ROS_INFO("Face truncation lines (%zu):", truncation_lines.face_line_equations.size());
+    // for (size_t i = 0; i < truncation_lines.face_line_equations.size(); ++i) {
+    //     const auto& line = truncation_lines.face_line_equations[i];
+    //     ROS_INFO("Face line %zu: %.4fx + %.4fy + %.4f = 0", 
+    //             i+1, line.a, line.b, line.c);
+    // }
+    
+    // // Print occlusion line equations
+    // ROS_INFO("Occlusion truncation lines (%zu):", truncation_lines.occlusion_line_equations.size());
+    // for (size_t i = 0; i < truncation_lines.occlusion_line_equations.size(); ++i) {
+    //     const auto& line = truncation_lines.occlusion_line_equations[i];
+    //     ROS_INFO("Occlusion line %zu: %.4fx + %.4fy + %.4f = 0", 
+    //             i+1, line.a, line.b, line.c);
+    // }
+    
+    // ROS_INFO("=================================");
+
+    // Visualize the truncation lines (optional)
+    if (truncation_lines.data_available) {
+        visualizeTruncationLines(mean_x, mean_y, z_height, face_points_2d, occlusion_points_2d);
+    }
+
+}
 
 //-----------------------------------------Callback Functions-----------------------------------------//
 // FOV 话题回调函数，解析数据并更新全局变量 `faces`
@@ -1815,6 +2093,8 @@ int main(int argc, char** argv) {
             
             // Visualize 2D Gaussian distribution at the drone's position
             visualizeGaussian2DAtDronePosition(drone_position);
+
+            gaussiantruncation();
 
         rate.sleep();
         }

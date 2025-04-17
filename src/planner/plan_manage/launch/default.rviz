@@ -534,13 +534,14 @@ Visualization Manager:
       Use rainbow: true
       Value: false
     - Class: rviz/MarkerArray
-      Enabled: false
+      Enabled: true
       Marker Topic: /nearest_face_points
       Name: MarkerArray
       Namespaces:
-        {}
+        nearest_points: true
+        nearest_points_text: true
       Queue Size: 100
-      Value: false
+      Value: true
     - Class: rviz/MarkerArray
       Enabled: false
       Marker Topic: /obstacle_clusters
@@ -574,11 +575,19 @@ Visualization Manager:
       Queue Size: 100
       Value: true
     - Class: rviz/MarkerArray
-      Enabled: true
+      Enabled: false
       Marker Topic: /drone_gaussian_2d
       Name: MarkerArray
       Namespaces:
         {}
+      Queue Size: 100
+      Value: false
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /truncation_lines
+      Name: MarkerArray
+      Namespaces:
+        truncation_lines: true
       Queue Size: 100
       Value: true
   Enabled: true
@@ -610,7 +619,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/ThirdPersonFollower
-      Distance: 7.964780807495117
+      Distance: 11.469245910644531
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -618,17 +627,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: -15.65658187866211
-        Y: -0.06788420677185059
-        Z: 0.8296194076538086
+        X: -7.247902870178223
+        Y: 0.6993012428283691
+        Z: 0.8296198844909668
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.4997966289520264
+      Pitch: 0.4097975790500641
       Target Frame: world
-      Yaw: 3.847336530685425
+      Yaw: 0.7292155027389526
     Saved:
       - Class: rviz/FPS
         Enable Stereo Rendering:
@@ -700,6 +709,6 @@ Window Geometry:
     collapsed: false
   Width: 1080
   X: 1920
-  Y: 463
+  Y: 580
   depth:
     collapsed: false

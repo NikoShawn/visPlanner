@@ -1,30 +1,61 @@
 import numpy as np
-from scipy.stats import norm
+from scipy.stats import norm as scipy_norm  # Rename to avoid conflicts
 import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon
 from matplotlib import cm
-from BLTruncation import BLTruncation, multivariate_normal
 
+# Function to calculate the multivariate normal PDF
+def multivariate_normal(pos, mu, Sigma):
+    n = mu.shape[0]
+    Sigma_det = np.linalg.det(Sigma)
+    Sigma_inv = np.linalg.inv(Sigma)
+    N = np.sqrt((2*np.pi)**n * Sigma_det)
+    
+    # This einsum call calculates (x-mu)T.Sigma-1.(x-mu) in a vectorized way
+    fac = np.einsum('...k,kl,...l->...', pos-mu, Sigma_inv, pos-mu)
+    
+    return np.exp(-fac / 2) / N
+
+# Barber and Lopez-Perez Truncation algorithm
+def BLTruncation(mu_0, Sigma_0, a, b):
+    # 确保所有输入都是正确的numpy数组
+    mu_0 = np.asarray(mu_0)
+    Sigma_0 = np.asarray(Sigma_0)
+    a = np.asarray(a).reshape(-1, 1)  # 转换为列向量 (n,1)
+    
+    # Reverse direction of the normal vector
+    a = -a
+    b = -b
+    
+    # Calculate key parameters
+    q0 = a.T @ Sigma_0 @ a  # 结果应该是标量
+    alpha = (b - a.T @ mu_0) / np.sqrt(q0)
+    
+    # Calculate truncation parameter
+    lambda_val = scipy_norm.pdf(alpha) / scipy_norm.cdf(alpha)  # Use scipy_norm instead of norm
+    
+    # Handle numerical issues
+    if np.isnan(lambda_val):
+        lambda_val = -alpha
+    
+    # Update the distribution parameters
+    mu1 = a.T @ mu_0 - lambda_val * np.sqrt(q0)
+    var1 = q0 * (1 - lambda_val**2 - alpha * lambda_val)
+    
+    # Calculate mean shift
+    dmu = (Sigma_0 @ a) * (a.T @ mu_0 - mu1) / q0
+    
+    # Update mean and covariance
+    mu = mu_0 - dmu.flatten()  # 确保结果是1D向量
+    
+    # 修正矩阵计算部分
+    term = (Sigma_0 @ a) @ (a.T @ Sigma_0)  # 显式矩阵乘法
+    Sigma = Sigma_0 - term * (q0 - var1) / (q0**2)
+    
+    return mu, Sigma
+
+# Apply individual truncations
 def IndividualTruncations(mu_0, Sigma_0, A, b):
-    """
-    Apply individual truncations to a Gaussian distribution
-    
-    Parameters:
-    -----------
-    mu_0 : numpy.ndarray
-        Original mean vector (shape (n,))
-    Sigma_0 : numpy.ndarray
-        Original covariance matrix (shape (n,n))
-    A : numpy.ndarray
-        Matrix where each row is a normal vector of a truncation plane (shape (m,n))
-    b : numpy.ndarray
-        Position parameters of the truncation planes (shape (m,))
-    
-    Returns:
-    --------
-    truncated_distributions : list of tuples
-        Each tuple contains (mu, Sigma, a, b) for each truncation
-    """
     # 确保输入是numpy数组
     mu_0 = np.asarray(mu_0)
     Sigma_0 = np.asarray(Sigma_0)
@@ -46,21 +77,8 @@ def IndividualTruncations(mu_0, Sigma_0, A, b):
     
     return truncated_distributions
 
+# Visualize individual truncations
 def visualize_individual_truncations(mu_0, Sigma_0, A, b):
-    """
-    Visualize multiple individual truncations of a Gaussian distribution on a single plot
-    
-    Parameters:
-    -----------
-    mu_0 : numpy.ndarray
-        Original mean vector (shape (2,))
-    Sigma_0 : numpy.ndarray
-        Original covariance matrix (shape (2,2))
-    A : numpy.ndarray
-        Matrix where each row is a normal vector (shape (m,2))
-    b : numpy.ndarray
-        Position parameters (shape (m,))
-    """
     # 获取所有独立截断的结果
     truncated_distributions = IndividualTruncations(mu_0, Sigma_0, A, b)
     
@@ -169,22 +187,56 @@ def visualize_individual_truncations(mu_0, Sigma_0, A, b):
     plt.tight_layout()
     return plt.gcf()
 
-# 测试不同截断线对原始分布的影响
+# Main execution
 if __name__ == "__main__":
-    # 原始高斯分布
-    mu_0 = np.array([1.0, 2.0])
-    Sigma_0 = np.array([[1.0, 0.5], 
-                        [0.5, 2.0]])
+    # Original Gaussian distribution parameters
+    mu_0 = np.array([-12.08, -8.18])  # Mean
+    Sigma_0 = np.array([[0.80, 0.0],   # Covariance matrix (assuming diagonal)
+                        [0.0, 0.80]])
+
+    # Extract a, b, c coefficients from line equations
+    lines = [
+        (-0.6866, 0.7270, -3.9360),   # Line 1
+        (-0.1902, 0.9817, 3.6661),    # Line 2
+        (0.8798, -0.4754, 5.4446),    # Line 3
+        (-0.6385, -0.7696, -15.1664)  # Line 4
+    ]
+
+    # Convert to normal vectors and position parameters
+    A = []  # Will contain the normal vectors
+    b = []  # Will contain the position parameters
+
+    for a_coef, b_coef, c_coef in lines:
+        # Create normal vector
+        normal = np.array([a_coef, b_coef])
+        
+        # Normalize
+        norm = np.linalg.norm(normal)
+        normal = normal / norm
+        c_normalized = c_coef / norm
+        
+        # Add to lists
+        A.append(normal)
+        b.append(-c_normalized)  # Note the negative sign to convert from c to b
+
+    # Convert lists to numpy arrays
+    A = np.array(A)
+    b = np.array(b)
+
+    # Print the original and transformed parameters
+    print("Original Gaussian Distribution:")
+    print(f"Mean: {mu_0}")
+    print(f"Covariance:\n{Sigma_0}")
     
-    # 多条截断线的参数
-    A = np.array([
-        [1.0, -0.1],   # 第一条截断线
-        [1.0, -0.5],    # 第二条截断线
-        [1.0, 1.0]    # 第三条截断线
-    ])
+    print("\nTruncation Lines (ax + by + c = 0):")
+    for i, (a_coef, b_coef, c_coef) in enumerate(lines):
+        print(f"Line {i+1}: {a_coef:.4f}x + {b_coef:.4f}y + {c_coef:.4f} = 0")
     
-    b = np.array([0.0, 1, 1.0])  # 对应位置参数
-    
-    # 执行多条截断并可视化
+    print("\nTransformed Parameters for BLTruncation (a·x ≤ b):")
+    for i, (a_vec, b_val) in enumerate(zip(A, b)):
+        print(f"Line {i+1}: normal vector={a_vec}, position={b_val:.4f}")
+
+    # Visualize the truncations
     fig = visualize_individual_truncations(mu_0, Sigma_0, A, b)
+    plt.savefig('gaussian_truncations.png', dpi=300, bbox_inches='tight')
     plt.show()
